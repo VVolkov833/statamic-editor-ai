@@ -1,5 +1,13 @@
 # Editor AI Assistant
 
+## IMPORTANT
+
+THIS REPOSITORY IS CURRENTLY A PLAYGROUND FOR EXPERIMENTS.
+
+IT IS NOT THE FINAL ADDON PRODUCT AND NOT A STABLE PUBLIC RELEASE.
+
+Behavior, naming, structure, and features may change at any time.
+
 Statamic addon that adds small Content Publishing utility buttons in Live Preview for the Pages collection.
 
 ## Features
