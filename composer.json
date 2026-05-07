@@ -1,0 +1,21 @@
+{
+  "name": "local/section-tools",
+  "description": "Statamic section tools addon",
+  "type": "statamic-addon",
+  "license": "proprietary",
+  "autoload": {
+    "psr-4": {
+      "Local\\SectionTools\\": "src/"
+    }
+  },
+  "extra": {
+    "laravel": {
+      "providers": [
+        "Local\\SectionTools\\ServiceProvider"
+      ]
+    },
+    "statamic": {
+      "name": "Section Tools"
+    }
+  }
+}
