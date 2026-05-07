@@ -1,6 +1,6 @@
 {
   "name": "local/section-tools",
-  "description": "Statamic section tools addon",
+  "description": "Statamic Editor AI Assistant addon",
   "type": "statamic-addon",
   "license": "proprietary",
   "autoload": {
@@ -15,7 +15,7 @@
       ]
     },
     "statamic": {
-      "name": "Section Tools"
+      "name": "Editor AI Assistant"
     }
   }
 }

@@ -1,4 +1,4 @@
-# Section Tools
+# Editor AI Assistant
 
 Statamic addon that adds small Content Publishing utility buttons in Live Preview for the Pages collection.
 
