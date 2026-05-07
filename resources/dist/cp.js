@@ -1,11 +1,58 @@
 (() => {
   const BUTTON_GROUP_ID = 'section-tools-live-preview-buttons';
+  const viteHost = window.location.hostname || '127.0.0.1';
+  const vitePort = window.location.port || '5173';
+
+  // Some live-preview iframe reload paths evaluate an untransformed Vite client.
+  if (typeof globalThis.__HMR_CONFIG_NAME__ === 'undefined') {
+    globalThis.__HMR_CONFIG_NAME__ = 'app';
+  }
+
+  if (typeof globalThis.__BASE__ === 'undefined') {
+    globalThis.__BASE__ = '/';
+  }
+
+  if (typeof globalThis.__SERVER_HOST__ === 'undefined') {
+    globalThis.__SERVER_HOST__ = `${viteHost}:${vitePort}`;
+  }
+
+  if (typeof globalThis.__HMR_PROTOCOL__ === 'undefined') {
+    globalThis.__HMR_PROTOCOL__ = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  }
+
+  if (typeof globalThis.__HMR_HOSTNAME__ === 'undefined') {
+    globalThis.__HMR_HOSTNAME__ = viteHost;
+  }
+
+  if (typeof globalThis.__HMR_PORT__ === 'undefined') {
+    globalThis.__HMR_PORT__ = vitePort;
+  }
+
+  if (typeof globalThis.__HMR_BASE__ === 'undefined') {
+    globalThis.__HMR_BASE__ = '/';
+  }
+
+  if (typeof globalThis.__HMR_DIRECT_TARGET__ === 'undefined') {
+    globalThis.__HMR_DIRECT_TARGET__ = `${viteHost}:${vitePort}${globalThis.__HMR_BASE__}`;
+  }
+
+  if (typeof globalThis.__WS_TOKEN__ === 'undefined') {
+    globalThis.__WS_TOKEN__ = 'dev';
+  }
 
   window.__sectionToolsLoaded = true;
   console.info('[SectionTools] cp.js loaded', window.location.pathname);
 
   function getPublishStore() {
     return window.Statamic?.$store?.state?.publish?.base ?? null;
+  }
+
+  function cloneValue(value) {
+    if (typeof structuredClone === 'function') {
+      return structuredClone(value);
+    }
+
+    return JSON.parse(JSON.stringify(value));
   }
 
   function getSections() {
@@ -26,13 +73,16 @@
   }
 
   function setSections(nextSections) {
-    window.Statamic.$store.dispatch('publish/base/setFieldValue', {
-      handle: 'sections',
-      value: nextSections,
-      user: window.Statamic?.user?.id,
-    });
+    const publishStore = getPublishStore();
 
-    window.Statamic.$events.$emit('live-preview.base.refresh');
+    if (!publishStore?.values) {
+      return;
+    }
+
+    window.Statamic.$store.dispatch('publish/base/setValues', {
+      ...publishStore.values,
+      sections: nextSections,
+    });
   }
 
   function uid(prefix = 'st') {
@@ -41,13 +91,24 @@
   }
 
   function createQuoteSet() {
-    return {
+    const sections = getSections() ?? [];
+    const quoteTemplate = sections.find((section) => section?.type === 'quote');
+
+    const quote = quoteTemplate ? cloneValue(quoteTemplate) : {
       id: uid('cpq'),
       type: 'quote',
       enabled: true,
       text: 'Test-Zitat aus Live Preview',
       author: 'CP Test',
     };
+
+    quote.id = uid('cpq');
+    quote.type = 'quote';
+    quote.enabled = typeof quote.enabled === 'boolean' ? quote.enabled : true;
+    quote.text = 'Test-Zitat aus Live Preview';
+    quote.author = 'CP Test';
+
+    return quote;
   }
 
   function insertQuoteAsSecondSection() {
@@ -96,7 +157,7 @@
       return;
     }
 
-    const cloned = JSON.parse(JSON.stringify(sections[2]));
+    const cloned = cloneValue(sections[2]);
     cloned.id = uid('cps');
 
     sections.splice(3, 0, cloned);

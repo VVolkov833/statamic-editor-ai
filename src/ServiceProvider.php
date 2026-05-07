@@ -8,6 +8,6 @@ class ServiceProvider extends AddonServiceProvider
 {
     public function bootAddon(): void
     {
-        $this->registerScript(__DIR__.'/../resources/dist/cp.js');
+        // The host app loads the CP script through its Vite pipeline in local development.
     }
 }
