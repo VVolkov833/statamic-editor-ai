@@ -1,3 +1,12 @@
+import {
+  insertQuoteAsSecondSection as libInsertQuoteAsSecondSection,
+  swapSections2And3 as libSwapSections2And3,
+  cloneThirdSectionAfterwards as libCloneThirdSectionAfterwards,
+  getPublishStore as libGetPublishStore,
+  getSections as libGetSections,
+} from './section-tools-lib';
+import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tools-panel';
+
 (() => {
   const BUTTON_GROUP_ID = 'section-tools-live-preview-buttons';
   const PANEL_ID = 'section-tools-floating-panel';
@@ -76,18 +85,12 @@
   }
 
   function getSections() {
-    const values = getPublishStore()?.values;
-
-    if (!values) {
-      return null;
-    }
-
-    return Array.isArray(values.sections) ? [...values.sections] : [];
+    return libGetSections(window.Statamic);
   }
 
   function isPagesEntryScreen() {
     const isPagesCollectionRoute = window.location.pathname.includes('/collections/pages');
-    const hasSectionsInPublishState = Array.isArray(getPublishStore()?.values?.sections);
+    const hasSectionsInPublishState = Array.isArray(libGetPublishStore(window.Statamic)?.values?.sections);
 
     return isPagesCollectionRoute && hasSectionsInPublishState;
   }
@@ -266,15 +269,7 @@
   }
 
   function insertQuoteAsSecondSection() {
-    const sections = getSections();
-
-    if (!sections) {
-      window.Statamic.$toast.error('Publish state wurde nicht gefunden.');
-      return;
-    }
-
-    sections.splice(Math.min(1, sections.length), 0, createQuoteSet());
-    if (setSections(sections)) {
+    if (libInsertQuoteAsSecondSection(window.Statamic)) {
       window.Statamic.$toast.success('Zitat als zweiter Abschnitt eingefuegt.');
     } else {
       window.Statamic.$toast.error('Aktualisierung fehlgeschlagen.');
@@ -294,8 +289,7 @@
       return;
     }
 
-    [sections[1], sections[2]] = [sections[2], sections[1]];
-    if (setSections(sections)) {
+    if (libSwapSections2And3(window.Statamic)) {
       window.Statamic.$toast.success('Abschnitte 2 und 3 wurden getauscht.');
     } else {
       window.Statamic.$toast.error('Aktualisierung fehlgeschlagen.');
@@ -315,11 +309,7 @@
       return;
     }
 
-    const cloned = cloneValue(sections[2]);
-    assignFreshSectionIdentity(cloned);
-
-    sections.splice(3, 0, cloned);
-    if (setSections(sections)) {
+    if (libCloneThirdSectionAfterwards(window.Statamic)) {
       window.Statamic.$toast.success('Abschnitt 3 wurde geklont und eingefuegt.');
     } else {
       window.Statamic.$toast.error('Aktualisierung fehlgeschlagen.');
@@ -556,13 +546,19 @@
   }
 
   function syncButtons() {
-    mountButtons();
-    unmountButtonsWhenOutOfScope();
+    syncSectionToolsUi({
+      isInScope: isPagesEntryScreen,
+      panelStorageKey,
+      actions: {
+        onQuote: insertQuoteAsSecondSection,
+        onSwap: swapSections2And3,
+        onClone: cloneThirdSectionAfterwards,
+      },
+    });
   }
 
   function syncFloatingPanel() {
-    mountFloatingPanel();
-    unmountFloatingPanelWhenOutOfScope();
+    syncButtons();
   }
 
   window.Statamic.booting(() => {
@@ -572,16 +568,7 @@
     syncFloatingPanel();
 
     window.addEventListener('resize', () => {
-      const panel = document.getElementById(PANEL_ID);
-      if (!panel) {
-        return;
-      }
-
-      const applied = applyPanelPosition(panel, {
-        x: panel.offsetLeft,
-        y: panel.offsetTop,
-      });
-      writePanelPosition(applied);
+      persistPanelPositionOnResize(panelStorageKey);
     });
 
     const observer = new MutationObserver(() => {
