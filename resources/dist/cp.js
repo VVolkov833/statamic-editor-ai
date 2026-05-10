@@ -4,6 +4,7 @@ import {
   cloneThirdSectionAfterwards as libCloneThirdSectionAfterwards,
   getPublishStore as libGetPublishStore,
   getSections as libGetSections,
+  buildSectionBrief,
 } from './section-tools-lib';
 import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tools-panel';
 
@@ -316,6 +317,42 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
     }
   }
 
+  function logSection2() {
+    const sections = getSections();
+
+    if (!sections) {
+      window.Statamic.$toast.error('Publish state wurde nicht gefunden.');
+      return;
+    }
+
+    if (sections.length < 2) {
+      window.Statamic.$toast.warning('Kein zweiter Abschnitt vorhanden.');
+      return;
+    }
+
+    console.log('[SectionTools] Section 2:', JSON.stringify(sections[1], null, 2));
+  }
+
+  function logSection2Brief() {
+    const sections = getSections();
+    const publishStore = libGetPublishStore(window.Statamic);
+
+    if (!sections) {
+      window.Statamic.$toast.error('Publish state wurde nicht gefunden.');
+      return;
+    }
+
+    if (sections.length < 2) {
+      window.Statamic.$toast.warning('Kein zweiter Abschnitt vorhanden.');
+      return;
+    }
+
+    console.log('[SectionTools] Section 2 (brief):', JSON.stringify(buildSectionBrief(sections[1], {
+      statamic: window.Statamic,
+      publishMeta: publishStore?.meta,
+    }), null, 2));
+  }
+
   function createButton(label, onClick) {
     const button = document.createElement('button');
 
@@ -553,6 +590,8 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
         onQuote: insertQuoteAsSecondSection,
         onSwap: swapSections2And3,
         onClone: cloneThirdSectionAfterwards,
+        onLogSection2: logSection2,
+        onLogSection2Brief: logSection2Brief,
       },
     });
   }
