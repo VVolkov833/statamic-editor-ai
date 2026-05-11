@@ -450,6 +450,89 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
     return typeof element.type === 'string' ? element.type : null;
   }
 
+  function simplifyBlueprintNode(node) {
+    if (node == null) {
+      return undefined;
+    }
+
+    if (Array.isArray(node)) {
+      const simplifiedItems = node
+        .map((item) => simplifyBlueprintNode(item))
+        .filter((item) => item !== undefined);
+
+      return simplifiedItems.length > 0 ? simplifiedItems : undefined;
+    }
+
+    if (typeof node !== 'object') {
+      return undefined;
+    }
+
+    const simplified = {};
+
+    if (typeof node.display === 'string') simplified.display = node.display;
+    if (typeof node.handle === 'string') simplified.handle = node.handle;
+    if (typeof node.type === 'string') simplified.type = node.type;
+    if (typeof node.input_type === 'string') simplified.input_type = node.input_type;
+    if (Object.prototype.hasOwnProperty.call(node, 'placeholder') && node.placeholder != null && node.placeholder !== '') {
+      simplified.placeholder = node.placeholder;
+    }
+    if (typeof node.component === 'string') simplified.component = node.component;
+    if (typeof node.prefix === 'string' && node.prefix !== '') simplified.prefix = node.prefix;
+    if (node.required === true) simplified.required = true;
+    if (Object.prototype.hasOwnProperty.call(node, 'default') && node.default != null && node.default !== '') {
+      simplified.default = node.default;
+    }
+    if (typeof node.character_limit === 'number' && node.character_limit > 0) {
+      simplified.character_limit = node.character_limit;
+    }
+
+    if (Array.isArray(node.options) && node.options.length > 0) {
+      simplified.options = node.options;
+    } else if (
+      node.options
+      && typeof node.options === 'object'
+      && !Array.isArray(node.options)
+      && Object.keys(node.options).length > 0
+    ) {
+      simplified.options = node.options;
+    }
+
+    const isAssetsField = node.type === 'assets' || node.component === 'assets';
+    if (isAssetsField) {
+      if (typeof node.max_files === 'number' && node.max_files > 0) {
+        simplified.max_files = node.max_files;
+      }
+
+      if (typeof node.container === 'string' && node.container !== '') {
+        simplified.container = node.container;
+      }
+    }
+
+    const simplifiedFields = simplifyBlueprintNode(node.fields);
+    if (simplifiedFields !== undefined) {
+      simplified.fields = simplifiedFields;
+    }
+
+    const simplifiedSets = simplifyBlueprintNode(node.sets);
+    if (simplifiedSets !== undefined) {
+      simplified.sets = simplifiedSets;
+    }
+
+    if (Object.keys(simplified).length > 0) {
+      return simplified;
+    }
+
+    const nested = Object.entries(node)
+      .map(([key, value]) => [key, simplifyBlueprintNode(value)])
+      .filter(([, value]) => value !== undefined);
+
+    if (nested.length > 0) {
+      return Object.fromEntries(nested);
+    }
+
+    return undefined;
+  }
+
   function logSection2() {
     const id = getSectionIdAtIndex(1);
     if (!id) {
@@ -548,9 +631,11 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
       return;
     }
 
+    const compactSetConfig = simplifyBlueprintNode(setConfig) ?? {};
+
     console.log(
       `[SectionTools] Element blueprint (id: ${sectionId}, type: ${sectionType}, path: ${match.path.join(' > ')}):`,
-      JSON.stringify(setConfig, null, 2),
+      JSON.stringify(compactSetConfig, null, 2),
     );
   }
 
