@@ -838,6 +838,7 @@ function buildTileBrief(tile, context) {
   const tileConfig = tile.type ? context.setConfigs[tile.type] : null;
   const tileFields = buildFieldsBrief(tile, tileConfig?.fields, context);
   const tileText = toPlainText(flattenToPlainText(tileFields));
+  const tileFallbackText = toPlainText(extractFallbackObjectText(tile, context));
 
   if (Object.keys(tileFields).length > 0) {
     brief.fields = tileFields;
@@ -845,6 +846,8 @@ function buildTileBrief(tile, context) {
 
   if (tileText) {
     brief.text = tileText;
+  } else if (tileFallbackText) {
+    brief.text = tileFallbackText;
   } else if (Array.isArray(tile.text) && tile.text.length > 0) {
     brief.text = toPlainText(extractProseMirrorText(tile.text, context));
   }
@@ -1254,12 +1257,16 @@ function buildItemBrief(item, context, configMap = null) {
   }
 
   const textFromFields = toPlainText(flattenToPlainText(extractedFields));
-  if (textFromFields) {
-    brief.text = textFromFields;
-  } else {
-    const fallbackText = toPlainText(extractFallbackObjectText(item, context));
-    if (fallbackText) {
-      brief.text = fallbackText;
+
+  // Avoid duplicate output: when structured fields exist, do not add a second text summary.
+  if (Object.keys(extractedFields).length === 0) {
+    if (textFromFields) {
+      brief.text = textFromFields;
+    } else {
+      const fallbackText = toPlainText(extractFallbackObjectText(item, context));
+      if (fallbackText) {
+        brief.text = fallbackText;
+      }
     }
   }
 
