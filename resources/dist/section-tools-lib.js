@@ -844,12 +844,15 @@ function buildTileBrief(tile, context) {
     brief.fields = tileFields;
   }
 
-  if (tileText) {
-    brief.text = tileText;
-  } else if (tileFallbackText) {
-    brief.text = tileFallbackText;
-  } else if (Array.isArray(tile.text) && tile.text.length > 0) {
-    brief.text = toPlainText(extractProseMirrorText(tile.text, context));
+  // Keep tile output non-duplicated: if fields exist, do not emit a second text summary.
+  if (Object.keys(tileFields).length === 0) {
+    if (tileText) {
+      brief.text = tileText;
+    } else if (tileFallbackText) {
+      brief.text = tileFallbackText;
+    } else if (Array.isArray(tile.text) && tile.text.length > 0) {
+      brief.text = toPlainText(extractProseMirrorText(tile.text, context));
+    }
   }
 
   return brief;
