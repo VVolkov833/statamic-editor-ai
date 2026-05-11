@@ -1208,11 +1208,11 @@ function buildItemBrief(item, context, configMap = null) {
 
   if (item.type === 'quote') {
     if (typeof item.text === 'string' && item.text.trim()) {
-      textParts.push(item.text.trim());
+      textParts.push(toPlainText(item.text));
     }
 
     if (typeof item.author === 'string' && item.author.trim()) {
-      textParts.push(item.author.trim());
+      textParts.push(toPlainText(item.author));
     }
   }
 
@@ -1238,7 +1238,7 @@ function buildItemBrief(item, context, configMap = null) {
 
   if (item.type === 'call_to_action') {
     if (typeof item.text === 'string' && item.text.trim()) {
-      textParts.push(item.text.trim());
+      textParts.push(toPlainText(item.text));
     }
 
     if (Array.isArray(item.buttons)) {
@@ -1253,14 +1253,14 @@ function buildItemBrief(item, context, configMap = null) {
         .filter(Boolean);
 
       if (buttonLabels.length > 0) {
-        textParts.push(buttonLabels.join(' '));
+        textParts.push(toPlainText(buttonLabels.join(' ')));
       }
     }
   }
 
   if (item.type === 'treatments') {
     if (typeof item.headline === 'string' && item.headline.trim()) {
-      textParts.push(item.headline.trim());
+      textParts.push(toPlainText(item.headline));
     }
 
     if (Array.isArray(item.treatments)) {
@@ -1268,13 +1268,13 @@ function buildItemBrief(item, context, configMap = null) {
         if (Array.isArray(treatment.treatment)) {
           treatment.treatment.forEach((t) => {
             if (typeof t.title === 'string' && t.title.trim()) {
-              textParts.push(t.title.trim());
+              textParts.push(toPlainText(t.title));
             }
 
             if (Array.isArray(t.text)) {
               const text = extractProseMirrorText(t.text, context);
               if (text) {
-                textParts.push(text);
+                textParts.push(toPlainText(text));
               }
             }
           });
@@ -1285,43 +1285,17 @@ function buildItemBrief(item, context, configMap = null) {
 
   if (item.type === 'contact_form') {
     if (typeof item.headline === 'string' && item.headline.trim()) {
-      textParts.push(item.headline.trim());
+      textParts.push(toPlainText(item.headline));
     }
 
     if (typeof item.text === 'string' && item.text.trim()) {
-      textParts.push(item.text.trim());
+      textParts.push(toPlainText(item.text));
     }
   }
 
   if (item.type === 'testimonials') {
     if (typeof item.headline === 'string' && item.headline.trim()) {
-      textParts.push(item.headline.trim());
-    }
-
-    if (Array.isArray(item.testimonials)) {
-      brief.testimonial_entries = item.testimonials.map((entryId) => {
-        if (typeof entryId !== 'string' || !entryId.trim()) {
-          return null;
-        }
-
-        const preview = findEntryPreviewById(context.publishMeta, entryId);
-        const previewText = normalizePreviewValue(preview);
-
-        return {
-          id: entryId,
-          preview: previewText,
-        };
-      }).filter(Boolean);
-
-      if (brief.testimonial_entries.length > 0) {
-        const previewTexts = brief.testimonial_entries
-          .map((e) => e.preview)
-          .filter(Boolean);
-
-        if (previewTexts.length > 0) {
-          textParts.push(previewTexts.join(' '));
-        }
-      }
+      textParts.push(toPlainText(item.headline));
     }
   }
 
@@ -1361,7 +1335,7 @@ function buildItemBrief(item, context, configMap = null) {
   }
 
   if (textParts.length > 0) {
-    brief.text = textParts.join(' ').replace(/\s+/g, ' ').trim();
+    brief.text = textParts.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
   }
 
   return brief;
