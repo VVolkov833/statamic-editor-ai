@@ -20,7 +20,7 @@ function appendDefaultActionButtons(container, actions) {
   container.appendChild(createButton('Clone 3 +1', actions.onClone));
   container.appendChild(createButton('unde', actions.onUndo));
   container.appendChild(createButton('Log §2', actions.onLogSection2));
-  container.appendChild(createButton('Log Page Brief', actions.onLogPageBrief));
+  container.appendChild(createButton('Log §2 Blueprint', actions.onLogSection2Blueprint));
 }
 
 function createButtonGroup(actions) {
