@@ -796,21 +796,170 @@ function extractFallbackObjectText(value, context) {
 }
 
 function extractFieldValue(handle, rawValue, fieldConfig, context) {
+  const fieldType = typeof fieldConfig?.type === 'string' ? fieldConfig.type : '';
+  const fieldDisplay = fieldConfig?.display ?? humanizeHandle(handle);
+
+  // Skip these field types entirely (except code which gets a note)
+  if (['code', 'revealer', 'width', 'icon', 'float', 'integer', 'collections', 'link', 'navs', 'structures', 'taxonomies', 'taxonomy_terms', 'user_groups', 'user_roles', 'users', 'array'].includes(fieldType)) {
+    if (fieldType === 'code') {
+      return `[${fieldDisplay}: code section]`;
+    }
+
+    return null;
+  }
+
+  // Markdown → strip to plain text
+  if (fieldType === 'markdown' && typeof rawValue === 'string') {
+    const plaintext = rawValue.replace(/[#*_`\[\]()]/g, '').trim();
+    return plaintext || null;
+  }
+
+  // Text → plain text
+  if (fieldType === 'text' && typeof rawValue === 'string') {
+    return rawValue.trim() || null;
+  }
+
+  // Textarea → plain text
+  if (fieldType === 'textarea' && typeof rawValue === 'string') {
+    return rawValue.trim() || null;
+  }
+
+  // Table → convert to plain text
+  if (fieldType === 'table' && Array.isArray(rawValue)) {
+    const rows = rawValue
+      .map((row) => {
+        if (Array.isArray(row)) {
+          return row.map((cell) => (typeof cell === 'string' ? cell.trim() : '')).filter(Boolean).join(' | ');
+        }
+
+        return null;
+      })
+      .filter(Boolean);
+
+    return rows.length > 0 ? rows.join('\n') : null;
+  }
+
+  // Color → as plain text
+  if (fieldType === 'color' && typeof rawValue === 'string') {
+    return rawValue.trim() || null;
+  }
+
+  // Date → as plain text
+  if (fieldType === 'date' && typeof rawValue === 'string') {
+    return rawValue.trim() || null;
+  }
+
+  // Hidden → print value or default
+  if (fieldType === 'hidden') {
+    const value = rawValue ?? fieldConfig?.default;
+    if (value !== null && value !== undefined) {
+      return typeof value === 'string' ? value.trim() : String(value);
+    }
+
+    return null;
+  }
+
+  // HTML → if not script/style, plain text
+  if (fieldType === 'html' && typeof rawValue === 'string') {
+    const isScript = /^<\s*(script|style)\b/i.test(rawValue);
+    if (isScript) {
+      return null;
+    }
+
+    const plaintext = rawValue.replace(/<[^>]*>/g, '').trim();
+    return plaintext || null;
+  }
+
+  // YAML → plain text
+  if (fieldType === 'yaml' && typeof rawValue === 'string') {
+    return rawValue.trim() || null;
+  }
+
+  // Video → URL only
+  if (fieldType === 'video' && typeof rawValue === 'string') {
+    return rawValue.startsWith('http') ? rawValue : null;
+  }
+
+  // Entries → headlines if possible
+  if (fieldType === 'entries' && Array.isArray(rawValue)) {
+    const entries = rawValue
+      .map((entryId) => {
+        if (typeof entryId !== 'string' || !entryId.trim()) {
+          return null;
+        }
+
+        const preview = findEntryPreviewById(context.publishMeta, entryId);
+        const previewText = normalizePreviewValue(preview);
+
+        return previewText || entryId;
+      })
+      .filter(Boolean);
+
+    return entries.length > 0 ? entries.join(', ') : null;
+  }
+
+  // Sites → headlines if possible
+  if (fieldType === 'sites' && Array.isArray(rawValue)) {
+    const sites = rawValue
+      .map((site) => {
+        if (typeof site === 'string') {
+          return site.trim();
+        }
+
+        if (site && typeof site === 'object' && typeof site.name === 'string') {
+          return site.name.trim();
+        }
+
+        return null;
+      })
+      .filter(Boolean);
+
+    return sites.length > 0 ? sites.join(', ') : null;
+  }
+
+  // "Like label" fields: display + handle + value (for option-based and container fields)
+  const likeLabel = ['button_group', 'checkbox', 'dictionary', 'radio', 'range', 'select', 'toggle', 'form', 'list'].includes(fieldType);
+  if (likeLabel) {
+    if (Array.isArray(rawValue)) {
+      const labels = rawValue
+        .map((item) => {
+          if (typeof item === 'string') {
+            return item;
+          }
+
+          if (item && typeof item === 'object') {
+            return item.label ?? item.value ?? item.title ?? JSON.stringify(item);
+          }
+
+          return String(item);
+        })
+        .filter(Boolean);
+
+      return labels.length > 0 ? `${fieldDisplay}: ${labels.join(', ')}` : null;
+    }
+
+    if (rawValue !== null && rawValue !== undefined && rawValue !== '' && rawValue !== false) {
+      return `${fieldDisplay}: ${String(rawValue)}`;
+    }
+
+    return null;
+  }
+
+  // Assets → show actual values/URLs
+  if (fieldType === 'assets' || handle === 'medium') {
+    const urls = extractAssetUrls(rawValue, context);
+    return urls.length > 0 ? urls.join(', ') : null;
+  }
+
   if (rawValue === null || rawValue === undefined) {
     return null;
   }
 
   const handleName = (handle ?? '').toLowerCase();
-  const fieldType = typeof fieldConfig?.type === 'string' ? fieldConfig.type : '';
 
   if (fieldType === 'bard' || (Array.isArray(rawValue) && rawValue[0]?.type === 'paragraph')) {
     const text = extractProseMirrorText(rawValue, context);
     return text || null;
-  }
-
-  if (fieldType === 'assets' || handleName === 'medium') {
-    const urls = extractAssetUrls(rawValue, context);
-    return urls.length > 0 ? urls : null;
   }
 
   if (handleName === 'buttons' && Array.isArray(rawValue)) {
@@ -833,26 +982,6 @@ function extractFieldValue(handle, rawValue, fieldConfig, context) {
   if (fieldType === 'group' && rawValue && typeof rawValue === 'object') {
     const nested = buildFieldsBrief(rawValue, fieldConfig?.fields, context);
     return Object.keys(nested).length > 0 ? nested : null;
-  }
-
-  if (fieldType === 'entries' && Array.isArray(rawValue)) {
-    const entries = rawValue
-      .map((entryId) => {
-        if (typeof entryId !== 'string' || !entryId.trim()) {
-          return null;
-        }
-
-        const preview = findEntryPreviewById(context.publishMeta, entryId);
-        const previewText = normalizePreviewValue(preview);
-
-        return {
-          id: entryId,
-          preview: previewText,
-        };
-      })
-      .filter(Boolean);
-
-    return entries.length > 0 ? entries : null;
   }
 
   if (Array.isArray(rawValue)) {
