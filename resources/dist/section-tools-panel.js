@@ -18,6 +18,7 @@ function appendDefaultActionButtons(container, actions) {
   container.appendChild(createButton('Quote +', actions.onQuote));
   container.appendChild(createButton('Swap 2<->3', actions.onSwap));
   container.appendChild(createButton('Clone 3 +1', actions.onClone));
+  container.appendChild(createButton('unde', actions.onUndo));
   container.appendChild(createButton('Log §2', actions.onLogSection2));
   container.appendChild(createButton('Log §2 Brief', actions.onLogSection2Brief));
 }

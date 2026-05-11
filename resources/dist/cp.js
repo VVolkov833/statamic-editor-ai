@@ -13,9 +13,11 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
   const PANEL_ID = 'section-tools-floating-panel';
   const PANEL_HANDLE_ID = 'section-tools-floating-panel-handle';
   const PANEL_MARGIN = 16;
+  const MAX_UNDO_STEPS = 10;
   const viteHost = window.location.hostname || '127.0.0.1';
   const vitePort = window.location.port || '5173';
   const panelStorageKey = `section-tools-panel-position:${window.Statamic?.user?.id ?? 'anon'}`;
+  const mutationHistory = [];
 
   // Some live-preview iframe reload paths evaluate an untransformed Vite client.
   if (typeof globalThis.__HMR_CONFIG_NAME__ === 'undefined') {
@@ -269,10 +271,36 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
     return quote;
   }
 
+  function pushUndoSnapshot() {
+    const sections = getSections();
+
+    if (!sections) {
+      return false;
+    }
+
+    mutationHistory.push(cloneValue(sections));
+
+    if (mutationHistory.length > MAX_UNDO_STEPS) {
+      mutationHistory.shift();
+    }
+
+    return true;
+  }
+
+  function popUndoSnapshot() {
+    return mutationHistory.pop() ?? null;
+  }
+
   function insertQuoteAsSecondSection() {
+    if (!pushUndoSnapshot()) {
+      window.Statamic.$toast.error('Publish state wurde nicht gefunden.');
+      return;
+    }
+
     if (libInsertQuoteAsSecondSection(window.Statamic)) {
       window.Statamic.$toast.success('Zitat als zweiter Abschnitt eingefuegt.');
     } else {
+      popUndoSnapshot();
       window.Statamic.$toast.error('Aktualisierung fehlgeschlagen.');
     }
   }
@@ -290,9 +318,15 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
       return;
     }
 
+    if (!pushUndoSnapshot()) {
+      window.Statamic.$toast.error('Publish state wurde nicht gefunden.');
+      return;
+    }
+
     if (libSwapSections2And3(window.Statamic)) {
       window.Statamic.$toast.success('Abschnitte 2 und 3 wurden getauscht.');
     } else {
+      popUndoSnapshot();
       window.Statamic.$toast.error('Aktualisierung fehlgeschlagen.');
     }
   }
@@ -310,11 +344,37 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
       return;
     }
 
+    if (!pushUndoSnapshot()) {
+      window.Statamic.$toast.error('Publish state wurde nicht gefunden.');
+      return;
+    }
+
     if (libCloneThirdSectionAfterwards(window.Statamic)) {
       window.Statamic.$toast.success('Abschnitt 3 wurde geklont und eingefuegt.');
     } else {
+      popUndoSnapshot();
       window.Statamic.$toast.error('Aktualisierung fehlgeschlagen.');
     }
+  }
+
+  function undoLastMutation() {
+    if (mutationHistory.length === 0) {
+      return;
+    }
+
+    const previousSections = popUndoSnapshot();
+    if (!previousSections) {
+      return;
+    }
+
+    if (setSections(previousSections)) {
+      window.Statamic.$toast.success('Letzte Mutation wurde rueckgaengig gemacht.');
+      return;
+    }
+
+    // Restore history entry when applying snapshot fails.
+    mutationHistory.push(previousSections);
+    window.Statamic.$toast.error('Undo fehlgeschlagen.');
   }
 
   function logSection2() {
@@ -590,6 +650,7 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
         onQuote: insertQuoteAsSecondSection,
         onSwap: swapSections2And3,
         onClone: cloneThirdSectionAfterwards,
+        onUndo: undoLastMutation,
         onLogSection2: logSection2,
         onLogSection2Brief: logSection2Brief,
       },
