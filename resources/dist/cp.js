@@ -564,6 +564,10 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
     logSectionBlueprintById(id);
   }
 
+  window.SectionTools = window.SectionTools ?? {};
+  window.SectionTools.logSectionById = logSectionById;
+  window.SectionTools.logBlueprintById = logSectionBlueprintById;
+
   function createButton(label, onClick) {
     const button = document.createElement('button');
 
