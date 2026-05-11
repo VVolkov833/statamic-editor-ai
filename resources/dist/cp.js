@@ -4,7 +4,7 @@ import {
   cloneThirdSectionAfterwards as libCloneThirdSectionAfterwards,
   getPublishStore as libGetPublishStore,
   getSections as libGetSections,
-  buildSectionBrief,
+  buildPageBrief,
 } from './section-tools-lib';
 import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tools-panel';
 
@@ -393,24 +393,26 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
     console.log('[SectionTools] Section 2:', JSON.stringify(sections[1], null, 2));
   }
 
-  function logSection2Brief() {
-    const sections = getSections();
+  function logPageBrief() {
     const publishStore = libGetPublishStore(window.Statamic);
+    const values = publishStore?.values;
 
-    if (!sections) {
+    if (!values) {
       window.Statamic.$toast.error('Publish state wurde nicht gefunden.');
       return;
     }
 
-    if (sections.length < 2) {
-      window.Statamic.$toast.warning('Kein zweiter Abschnitt vorhanden.');
+    const pageBrief = buildPageBrief(values, {
+      statamic: window.Statamic,
+      publishMeta: publishStore?.meta,
+    });
+
+    if (!pageBrief) {
+      window.Statamic.$toast.error('Page brief konnte nicht erstellt werden.');
       return;
     }
 
-    console.log('[SectionTools] Section 2 (brief):', JSON.stringify(buildSectionBrief(sections[1], {
-      statamic: window.Statamic,
-      publishMeta: publishStore?.meta,
-    }), null, 2));
+    console.log('[SectionTools] Page brief:', JSON.stringify(pageBrief, null, 2));
   }
 
   function createButton(label, onClick) {
@@ -652,7 +654,7 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
         onClone: cloneThirdSectionAfterwards,
         onUndo: undoLastMutation,
         onLogSection2: logSection2,
-        onLogSection2Brief: logSection2Brief,
+        onLogPageBrief: logPageBrief,
       },
     });
   }

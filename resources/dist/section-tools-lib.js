@@ -330,6 +330,134 @@ function getSetConfigs(statamic) {
   return map;
 }
 
+function getReplicatorSetConfigs(fieldConfig) {
+  const sets = fieldConfig?.sets;
+  if (!sets || typeof sets !== 'object') {
+    return {};
+  }
+
+  const map = {};
+
+  Object.values(sets).forEach((group) => {
+    const groupSets = group?.sets;
+    if (!groupSets || typeof groupSets !== 'object') {
+      return;
+    }
+
+    Object.entries(groupSets).forEach(([setHandle, setConfig]) => {
+      if (!map[setHandle]) {
+        map[setHandle] = {
+          display: setConfig?.display,
+          fields: Array.isArray(setConfig?.fields) ? setConfig.fields : [],
+        };
+      }
+    });
+  });
+
+  return map;
+}
+
+function extractUrlFromAssetValue(value) {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  if (typeof value.url === 'string' && value.url.trim()) {
+    return value.url.trim();
+  }
+
+  if (typeof value.permalink === 'string' && value.permalink.trim()) {
+    return value.permalink.trim();
+  }
+
+  if (typeof value.path === 'string' && value.path.trim()) {
+    const path = value.path.trim();
+    return path.startsWith('/') ? path : `/${path}`;
+  }
+
+  return null;
+}
+
+function findAssetUrlById(node, id) {
+  function walk(value, depth = 0) {
+    if (!value || depth > 7) {
+      return null;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = walk(item, depth + 1);
+        if (found) {
+          return found;
+        }
+      }
+
+      return null;
+    }
+
+    if (typeof value !== 'object') {
+      return null;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(value, id)) {
+      const maybeUrl = extractUrlFromAssetValue(value[id]);
+      if (maybeUrl) {
+        return maybeUrl;
+      }
+    }
+
+    const maybeDirectUrl = extractUrlFromAssetValue(value);
+    if (maybeDirectUrl && (value.id === id || value._id === id || value.handle === id)) {
+      return maybeDirectUrl;
+    }
+
+    for (const nested of Object.values(value)) {
+      const found = walk(nested, depth + 1);
+      if (found) {
+        return found;
+      }
+    }
+
+    return null;
+  }
+
+  return walk(node);
+}
+
+function extractAssetUrls(value, context) {
+  if (!value) {
+    return [];
+  }
+
+  const items = Array.isArray(value) ? value : [value];
+  const urls = [];
+
+  for (const item of items) {
+    if (typeof item === 'string') {
+      if (item.startsWith('http://') || item.startsWith('https://') || item.startsWith('/')) {
+        urls.push(item);
+        continue;
+      }
+
+      const resolved = findAssetUrlById(context.publishMeta, item)
+        || findAssetUrlById(context.statamic?.$store?.state, item);
+
+      if (resolved) {
+        urls.push(resolved);
+      }
+
+      continue;
+    }
+
+    const url = extractUrlFromAssetValue(item);
+    if (url) {
+      urls.push(url);
+    }
+  }
+
+  return [...new Set(urls)];
+}
+
 function findPreviewBySetId(meta, setId) {
   function walk(node) {
     if (!node || typeof node !== 'object') {
@@ -364,6 +492,44 @@ function findPreviewBySetId(meta, setId) {
   return walk(meta);
 }
 
+function findEntryPreviewById(meta, entryId) {
+  function walk(node, depth = 0) {
+    if (!node || depth > 8) {
+      return null;
+    }
+
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const found = walk(item, depth + 1);
+        if (found) {
+          return found;
+        }
+      }
+
+      return null;
+    }
+
+    if (typeof node !== 'object') {
+      return null;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(node, entryId)) {
+      return node[entryId];
+    }
+
+    for (const value of Object.values(node)) {
+      const found = walk(value, depth + 1);
+      if (found) {
+        return found;
+      }
+    }
+
+    return null;
+  }
+
+  return walk(meta);
+}
+
 function normalizePreviewValue(value) {
   if (['null', '[]', '{}', ''].includes(JSON.stringify(value))) {
     return null;
@@ -382,6 +548,23 @@ function normalizePreviewValue(value) {
   }
 
   return JSON.stringify(value);
+}
+
+function normalizeScalarValue(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim();
+    return normalized ? normalized : null;
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+
+  return null;
 }
 
 function buildSetPreviewText(previews, setConfig, showFieldPreviews = true) {
@@ -419,6 +602,24 @@ function buildButtonItemBrief(item, context) {
   }
 
   return label;
+}
+
+function buildButtonItemData(item, context) {
+  if (!item || typeof item !== 'object') {
+    return null;
+  }
+
+  const type = item.type;
+  const buttonConfig = context.setConfigs[type] ?? null;
+  const label = buttonConfig?.display || humanizeHandle(type);
+
+  return {
+    type,
+    label,
+    title: typeof item.title === 'string' && item.title.trim() ? item.title.trim() : null,
+    link: typeof item.link === 'string' && item.link.trim() ? item.link.trim() : null,
+    url: typeof item.url === 'string' && item.url.trim() ? item.url.trim() : null,
+  };
 }
 
 function buildAccordionEntryBrief(entry, context) {
@@ -518,28 +719,432 @@ function buildTileBrief(tile, context) {
   return brief;
 }
 
+function extractFallbackObjectText(value, context) {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  if (Array.isArray(value)) {
+    const parts = value
+      .map((item) => {
+        if (typeof item === 'string') {
+          return item.trim();
+        }
+
+        if (Array.isArray(item)) {
+          return extractProseMirrorText(item, context);
+        }
+
+        if (item && typeof item === 'object') {
+          return extractFallbackObjectText(item, context);
+        }
+
+        return null;
+      })
+      .filter(Boolean);
+
+    return parts.length > 0 ? parts.join(' ') : null;
+  }
+
+  const parts = [];
+
+  Object.entries(value).forEach(([key, nested]) => {
+    if (['_id', 'id', 'type', 'enabled'].includes(key)) {
+      return;
+    }
+
+    if (Array.isArray(nested)) {
+      if (nested.length > 0 && nested[0] && typeof nested[0] === 'object' && nested[0].type === 'paragraph') {
+        const text = extractProseMirrorText(nested, context);
+        if (text) {
+          parts.push(text);
+        }
+        return;
+      }
+
+      const urls = extractAssetUrls(nested, context);
+      if (urls.length > 0) {
+        parts.push(urls.join(' '));
+        return;
+      }
+
+      const nestedText = extractFallbackObjectText(nested, context);
+      if (nestedText) {
+        parts.push(nestedText);
+      }
+
+      return;
+    }
+
+    if (nested && typeof nested === 'object') {
+      const nestedText = extractFallbackObjectText(nested, context);
+      if (nestedText) {
+        parts.push(nestedText);
+      }
+      return;
+    }
+
+    if (/(title|headline|text|content|author|name|url|link)/i.test(key)) {
+      const scalar = normalizeScalarValue(nested);
+      if (scalar !== null) {
+        parts.push(String(scalar));
+      }
+    }
+  });
+
+  return parts.length > 0 ? parts.join(' ') : null;
+}
+
+function extractFieldValue(handle, rawValue, fieldConfig, context) {
+  if (rawValue === null || rawValue === undefined) {
+    return null;
+  }
+
+  const handleName = (handle ?? '').toLowerCase();
+  const fieldType = typeof fieldConfig?.type === 'string' ? fieldConfig.type : '';
+
+  if (fieldType === 'bard' || (Array.isArray(rawValue) && rawValue[0]?.type === 'paragraph')) {
+    const text = extractProseMirrorText(rawValue, context);
+    return text || null;
+  }
+
+  if (fieldType === 'assets' || handleName === 'medium') {
+    const urls = extractAssetUrls(rawValue, context);
+    return urls.length > 0 ? urls : null;
+  }
+
+  if (handleName === 'buttons' && Array.isArray(rawValue)) {
+    const buttons = rawValue
+      .map((button) => buildButtonItemData(button, context))
+      .filter(Boolean);
+
+    return buttons.length > 0 ? buttons : null;
+  }
+
+  if (fieldType === 'replicator' && Array.isArray(rawValue)) {
+    const replicatorSetConfigs = getReplicatorSetConfigs(fieldConfig);
+    const items = rawValue
+      .map((item) => buildItemBrief(item, context, replicatorSetConfigs))
+      .filter(Boolean);
+
+    return items.length > 0 ? items : null;
+  }
+
+  if (fieldType === 'group' && rawValue && typeof rawValue === 'object') {
+    const nested = buildFieldsBrief(rawValue, fieldConfig?.fields, context);
+    return Object.keys(nested).length > 0 ? nested : null;
+  }
+
+  if (fieldType === 'entries' && Array.isArray(rawValue)) {
+    const entries = rawValue
+      .map((entryId) => {
+        if (typeof entryId !== 'string' || !entryId.trim()) {
+          return null;
+        }
+
+        const preview = findEntryPreviewById(context.publishMeta, entryId);
+        const previewText = normalizePreviewValue(preview);
+
+        return {
+          id: entryId,
+          preview: previewText,
+        };
+      })
+      .filter(Boolean);
+
+    return entries.length > 0 ? entries : null;
+  }
+
+  if (Array.isArray(rawValue)) {
+    const assets = extractAssetUrls(rawValue, context);
+    if (assets.length > 0) {
+      return assets;
+    }
+
+    const list = rawValue
+      .map((item) => {
+        if (typeof item === 'object' && item?.type) {
+          const brief = buildItemBrief(item, context);
+          return brief || null;
+        }
+
+        const scalar = normalizeScalarValue(item);
+        return scalar === null ? null : scalar;
+      })
+      .filter((item) => item !== null);
+
+    return list.length > 0 ? list : null;
+  }
+
+  if (rawValue && typeof rawValue === 'object') {
+    const nested = buildFieldsBrief(rawValue, fieldConfig?.fields, context);
+    if (Object.keys(nested).length > 0) {
+      return nested;
+    }
+
+    return extractFallbackObjectText(rawValue, context);
+  }
+
+  return normalizeScalarValue(rawValue);
+}
+
+function buildFieldsBrief(values, fieldEntries, context) {
+  if (!values || typeof values !== 'object') {
+    return {};
+  }
+
+  const result = {};
+
+  if (Array.isArray(fieldEntries) && fieldEntries.length > 0) {
+    fieldEntries.forEach((fieldEntry) => {
+      const handle = fieldEntry?.handle;
+      if (!handle) {
+        return;
+      }
+
+      const fieldConfig = fieldEntry?.field && typeof fieldEntry.field === 'object'
+        ? { ...fieldEntry.field, ...(fieldEntry?.config ?? {}) }
+        : { ...(fieldEntry?.config ?? {}) };
+
+      const value = extractFieldValue(handle, values[handle], fieldConfig, context);
+      if (value !== null) {
+        result[handle] = value;
+      }
+    });
+  }
+
+  if (Object.keys(result).length === 0) {
+    Object.entries(values).forEach(([handle, value]) => {
+      if (['_id', 'id', 'type', 'enabled'].includes(handle)) {
+        return;
+      }
+
+      const extracted = extractFieldValue(handle, value, {}, context);
+      if (extracted !== null) {
+        result[handle] = extracted;
+      }
+    });
+  }
+
+  return result;
+}
+
+function buildItemBrief(item, context, configMap = null) {
+  if (!item || typeof item !== 'object') {
+    return null;
+  }
+
+  const itemType = item.type;
+  const itemConfig = (configMap && itemType ? configMap[itemType] : null)
+    ?? (itemType ? context.setConfigs[itemType] : null)
+    ?? null;
+
+  const brief = {
+    type: itemType,
+    _id: item._id,
+  };
+
+  if (itemConfig?.display) {
+    brief.display = itemConfig.display;
+  }
+
+  const textParts = [];
+  const fieldConfigs = Array.isArray(itemConfig?.fields) ? itemConfig.fields : [];
+
+  if (Array.isArray(item.tiles) && !brief.tiles) {
+    brief.tiles = item.tiles.map((tile) => buildTileBrief(tile, context));
+  }
+
+  if (item.type === 'quote') {
+    if (typeof item.text === 'string' && item.text.trim()) {
+      textParts.push(item.text.trim());
+    }
+
+    if (typeof item.author === 'string' && item.author.trim()) {
+      textParts.push(item.author.trim());
+    }
+  }
+
+  if (Array.isArray(item.text) && !brief.text) {
+    const text = extractProseMirrorText(item.text, context);
+    if (text) {
+      textParts.push(text);
+    }
+  }
+
+  if (item.type === 'medium') {
+    const mediumUrls = item.medium && Array.isArray(item.medium)
+      ? extractAssetUrls(item.medium, context)
+      : [];
+
+    if (mediumUrls.length > 0) {
+      brief.medium_url = mediumUrls[0];
+      if (mediumUrls.length > 1) {
+        brief.medium_urls = mediumUrls;
+      }
+    }
+  }
+
+  if (item.type === 'call_to_action') {
+    if (typeof item.text === 'string' && item.text.trim()) {
+      textParts.push(item.text.trim());
+    }
+
+    if (Array.isArray(item.buttons)) {
+      const buttonLabels = item.buttons
+        .map((btn) => {
+          if (btn.type === 'button_custom' && typeof btn.title === 'string') {
+            return btn.title.trim();
+          }
+
+          return '';
+        })
+        .filter(Boolean);
+
+      if (buttonLabels.length > 0) {
+        textParts.push(buttonLabels.join(' '));
+      }
+    }
+  }
+
+  if (item.type === 'treatments') {
+    if (typeof item.headline === 'string' && item.headline.trim()) {
+      textParts.push(item.headline.trim());
+    }
+
+    if (Array.isArray(item.treatments)) {
+      item.treatments.forEach((treatment) => {
+        if (Array.isArray(treatment.treatment)) {
+          treatment.treatment.forEach((t) => {
+            if (typeof t.title === 'string' && t.title.trim()) {
+              textParts.push(t.title.trim());
+            }
+
+            if (Array.isArray(t.text)) {
+              const text = extractProseMirrorText(t.text, context);
+              if (text) {
+                textParts.push(text);
+              }
+            }
+          });
+        }
+      });
+    }
+  }
+
+  if (item.type === 'contact_form') {
+    if (typeof item.headline === 'string' && item.headline.trim()) {
+      textParts.push(item.headline.trim());
+    }
+
+    if (typeof item.text === 'string' && item.text.trim()) {
+      textParts.push(item.text.trim());
+    }
+  }
+
+  if (item.type === 'testimonials') {
+    if (typeof item.headline === 'string' && item.headline.trim()) {
+      textParts.push(item.headline.trim());
+    }
+
+    if (Array.isArray(item.testimonials)) {
+      brief.testimonial_entries = item.testimonials.map((entryId) => {
+        if (typeof entryId !== 'string' || !entryId.trim()) {
+          return null;
+        }
+
+        const preview = findEntryPreviewById(context.publishMeta, entryId);
+        const previewText = normalizePreviewValue(preview);
+
+        return {
+          id: entryId,
+          preview: previewText,
+        };
+      }).filter(Boolean);
+
+      if (brief.testimonial_entries.length > 0) {
+        const previewTexts = brief.testimonial_entries
+          .map((e) => e.preview)
+          .filter(Boolean);
+
+        if (previewTexts.length > 0) {
+          textParts.push(previewTexts.join(' '));
+        }
+      }
+    }
+  }
+
+  for (const fieldEntry of fieldConfigs) {
+    const handle = fieldEntry?.handle;
+    if (!handle || ['headline', 'text', 'medium', 'buttons', 'treatments', 'testimonials'].includes(handle)) {
+      continue;
+    }
+
+    const fieldType = fieldEntry?.field?.type ?? fieldEntry?.field?.config?.type ?? '';
+    const value = item[handle];
+
+    if (fieldType === 'toggle') {
+      const label = fieldEntry?.field?.display ?? humanizeHandle(handle);
+      const toggleValue = value ? 'yes' : 'no';
+      textParts.push(`${label}: ${toggleValue}`);
+    }
+
+    if (fieldType === 'select' && typeof value === 'string') {
+      const label = fieldEntry?.field?.display ?? humanizeHandle(handle);
+      textParts.push(`${label}: ${value}`);
+    }
+  }
+
+  if (textParts.length > 0) {
+    brief.text = textParts.join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  return brief;
+}
+
 export function buildSectionBrief(section, options = {}) {
   if (!section || typeof section !== 'object') {
     return null;
   }
 
   const context = {
+    statamic: options.statamic ?? window.Statamic,
     publishMeta: options.publishMeta ?? getPublishStore(options.statamic)?.meta ?? null,
     setConfigs: options.setConfigs ?? getSetConfigs(options.statamic),
     showFieldPreviews: options.showFieldPreviews ?? true,
   };
 
-  const brief = { type: section.type, _id: section._id };
+  return buildItemBrief(section, context);
+}
 
-  if (Array.isArray(section.tiles)) {
-    brief.tiles = section.tiles.map((tile) => buildTileBrief(tile, context));
+export function buildPageBrief(values, options = {}) {
+  const sourceValues = values ?? getPublishStore(options.statamic)?.values ?? null;
+  if (!sourceValues || typeof sourceValues !== 'object') {
+    return null;
   }
 
-  if (Array.isArray(section.text)) {
-    brief.text = extractProseMirrorText(section.text, context);
-  }
+  const context = {
+    statamic: options.statamic ?? window.Statamic,
+    publishMeta: options.publishMeta ?? getPublishStore(options.statamic)?.meta ?? null,
+    setConfigs: options.setConfigs ?? getSetConfigs(options.statamic),
+    showFieldPreviews: options.showFieldPreviews ?? true,
+  };
 
-  return brief;
+  const headerItems = Array.isArray(sourceValues.header) ? sourceValues.header : [];
+  const sections = Array.isArray(sourceValues.sections) ? sourceValues.sections : [];
+
+  return {
+    title: typeof sourceValues.title === 'string' ? sourceValues.title : null,
+    header: headerItems.map((item, index) => ({
+      index,
+      ...buildItemBrief(item, context),
+    })),
+    sectionCount: sections.length,
+    sections: sections.map((section, index) => ({
+      index,
+      ...buildItemBrief(section, context),
+    })),
+  };
 }
 
 export function cloneThirdSectionAfterwards(statamic) {
