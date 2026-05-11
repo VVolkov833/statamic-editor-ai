@@ -875,9 +875,9 @@ function extractFieldValue(handle, rawValue, fieldConfig, context) {
     return rawValue.trim() || null;
   }
 
-  // Video → URL only
+  // Video → URL/value text
   if (fieldType === 'video' && typeof rawValue === 'string') {
-    return rawValue.startsWith('http') ? rawValue : null;
+    return rawValue.trim() || null;
   }
 
   // Entries → headlines if possible
@@ -917,10 +917,17 @@ function extractFieldValue(handle, rawValue, fieldConfig, context) {
     return sites.length > 0 ? sites.join(', ') : null;
   }
 
-  // "Like label" fields: display + handle + value (for option-based and container fields)
-  const likeLabel = ['button_group', 'checkbox', 'dictionary', 'radio', 'range', 'select', 'toggle', 'form', 'list'].includes(fieldType);
+  // "Like label" fields: display + handle + value
+  const likeLabel = ['button_group', 'checkbox', 'dictionary', 'radio', 'range', 'select', 'toggle', 'assets', 'form', 'list'].includes(fieldType);
   if (likeLabel) {
+    const labelPrefix = `${fieldDisplay} (${handle})`;
+
     if (Array.isArray(rawValue)) {
+      if (fieldType === 'assets') {
+        const urls = extractAssetUrls(rawValue, context);
+        return urls.length > 0 ? `${labelPrefix}: ${urls.join(', ')}` : null;
+      }
+
       const labels = rawValue
         .map((item) => {
           if (typeof item === 'string') {
@@ -933,19 +940,29 @@ function extractFieldValue(handle, rawValue, fieldConfig, context) {
 
           return String(item);
         })
+        .map((value) => (typeof value === 'string' ? value.trim() : value))
         .filter(Boolean);
 
-      return labels.length > 0 ? `${fieldDisplay}: ${labels.join(', ')}` : null;
+      return labels.length > 0 ? `${labelPrefix}: ${labels.join(', ')}` : null;
     }
 
-    if (rawValue !== null && rawValue !== undefined && rawValue !== '' && rawValue !== false) {
-      return `${fieldDisplay}: ${String(rawValue)}`;
+    if (fieldType === 'toggle') {
+      return `${labelPrefix}: ${rawValue ? 'yes' : 'no'}`;
+    }
+
+    if (fieldType === 'assets') {
+      const urls = extractAssetUrls(rawValue, context);
+      return urls.length > 0 ? `${labelPrefix}: ${urls.join(', ')}` : null;
+    }
+
+    if (rawValue !== null && rawValue !== undefined && rawValue !== '') {
+      return `${labelPrefix}: ${String(rawValue)}`;
     }
 
     return null;
   }
 
-  // Assets → show actual values/URLs
+  // Assets fallback → show actual values/URLs
   if (fieldType === 'assets' || handle === 'medium') {
     const urls = extractAssetUrls(rawValue, context);
     return urls.length > 0 ? urls.join(', ') : null;
@@ -982,6 +999,21 @@ function extractFieldValue(handle, rawValue, fieldConfig, context) {
   if (fieldType === 'group' && rawValue && typeof rawValue === 'object') {
     const nested = buildFieldsBrief(rawValue, fieldConfig?.fields, context);
     return Object.keys(nested).length > 0 ? nested : null;
+  }
+
+  if (fieldType === 'grid' && Array.isArray(rawValue)) {
+    const rows = rawValue
+      .map((row) => {
+        if (!row || typeof row !== 'object') {
+          return null;
+        }
+
+        const nested = buildFieldsBrief(row, fieldConfig?.fields, context);
+        return Object.keys(nested).length > 0 ? nested : null;
+      })
+      .filter(Boolean);
+
+    return rows.length > 0 ? rows : null;
   }
 
   if (Array.isArray(rawValue)) {
