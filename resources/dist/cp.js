@@ -18,6 +18,7 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
   const vitePort = window.location.port || '5173';
   const panelStorageKey = `section-tools-panel-position:${window.Statamic?.user?.id ?? 'anon'}`;
   const mutationHistory = [];
+  let uiSyncQueued = false;
 
   // Some live-preview iframe reload paths evaluate an untransformed Vite client.
   if (typeof globalThis.__HMR_CONFIG_NAME__ === 'undefined') {
@@ -167,6 +168,10 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
 
   function getSectionId(section) {
     return section?._id ?? section?.id ?? section?.key ?? null;
+  }
+
+  function getNodeId(node) {
+    return node?._id ?? node?.id ?? node?.key ?? node?.attrs?.id ?? null;
   }
 
   function buildDefaultPreview(section) {
@@ -377,7 +382,16 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
     window.Statamic.$toast.error('Undo fehlgeschlagen.');
   }
 
-  function logSection2() {
+  function getSectionIdAtIndex(index) {
+    const sections = getSections();
+    if (!sections || sections.length <= index) {
+      return null;
+    }
+
+    return getSectionId(sections[index]) ?? null;
+  }
+
+  function logSectionById(sectionId) {
     const sections = getSections();
 
     if (!sections) {
@@ -385,12 +399,65 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
       return;
     }
 
-    if (sections.length < 2) {
-      window.Statamic.$toast.warning('Kein zweiter Abschnitt vorhanden.');
+    const section = sections.find((s) => getSectionId(s) === sectionId);
+    if (!section) {
+      console.warn(`[SectionTools] Section with id "${sectionId}" not found.`);
       return;
     }
 
-    console.log('[SectionTools] Section 2:', JSON.stringify(sections[1], null, 2));
+    console.log(`[SectionTools] Section (id: ${sectionId}):`, JSON.stringify(section, null, 2));
+  }
+
+  function findElementById(node, targetId, path = []) {
+    if (!node || typeof node !== 'object') {
+      return null;
+    }
+
+    if (getNodeId(node) === targetId) {
+      return { element: node, path };
+    }
+
+    if (Array.isArray(node)) {
+      for (let index = 0; index < node.length; index += 1) {
+        const found = findElementById(node[index], targetId, [...path, index]);
+        if (found) {
+          return found;
+        }
+      }
+
+      return null;
+    }
+
+    for (const [key, value] of Object.entries(node)) {
+      const found = findElementById(value, targetId, [...path, key]);
+      if (found) {
+        return found;
+      }
+    }
+
+    return null;
+  }
+
+  function getBlueprintHandleForElement(element) {
+    if (!element || typeof element !== 'object') {
+      return null;
+    }
+
+    if (element.type === 'set' && typeof element?.attrs?.values?.type === 'string') {
+      return element.attrs.values.type;
+    }
+
+    return typeof element.type === 'string' ? element.type : null;
+  }
+
+  function logSection2() {
+    const id = getSectionIdAtIndex(1);
+    if (!id) {
+      console.warn('[SectionTools] No section at index 2.');
+      return;
+    }
+
+    logSectionById(id);
   }
 
   function logPageBrief() {
@@ -413,6 +480,88 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
     }
 
     console.log('[SectionTools] Page brief:', JSON.stringify(pageBrief, null, 2));
+  }
+
+  function logSectionBlueprintById(sectionId) {
+    const publishStore = libGetPublishStore(window.Statamic);
+
+    const values = publishStore?.values;
+    if (!values) {
+      window.Statamic.$toast.error('Publish state wurde nicht gefunden.');
+      return;
+    }
+
+    const match = findElementById(values, sectionId);
+    if (!match) {
+      console.warn(`[SectionTools] Element with id "${sectionId}" not found.`);
+      return;
+    }
+
+    const sectionType = getBlueprintHandleForElement(match.element);
+    if (!sectionType) {
+      console.warn(`[SectionTools] Element "${sectionId}" has no blueprint handle/type.`);
+      return;
+    }
+
+    const blueprint = publishStore?.blueprint;
+    if (!blueprint) {
+      window.Statamic.$toast.error('Page blueprint wurde nicht gefunden.');
+      return;
+    }
+
+    function findSetConfig(node) {
+      // Statamic CP serializes sets as arrays of objects with explicit `handle` properties
+      // (via Sets::preProcessConfig). Walk the whole tree and match by handle.
+      if (!node || typeof node !== 'object') {
+        return null;
+      }
+
+      if (Array.isArray(node)) {
+        for (const item of node) {
+          const found = findSetConfig(item);
+          if (found) return found;
+        }
+        return null;
+      }
+
+      if (
+        typeof node.handle === 'string' &&
+        node.handle === sectionType &&
+        Array.isArray(node.fields) &&
+        Object.prototype.hasOwnProperty.call(node, 'display')
+      ) {
+        return node;
+      }
+
+      for (const value of Object.values(node)) {
+        const found = findSetConfig(value);
+        if (found) return found;
+      }
+
+      return null;
+    }
+
+    const setConfig = findSetConfig(blueprint);
+
+    if (!setConfig) {
+      console.warn(`[SectionTools] No blueprint entry for type "${sectionType}".`);
+      return;
+    }
+
+    console.log(
+      `[SectionTools] Element blueprint (id: ${sectionId}, type: ${sectionType}, path: ${match.path.join(' > ')}):`,
+      JSON.stringify(setConfig, null, 2),
+    );
+  }
+
+  function logSection2Blueprint() {
+    const id = getSectionIdAtIndex(1);
+    if (!id) {
+      console.warn('[SectionTools] No section at index 2.');
+      return;
+    }
+
+    logSectionBlueprintById(id);
   }
 
   function createButton(label, onClick) {
@@ -654,28 +803,39 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
         onClone: cloneThirdSectionAfterwards,
         onUndo: undoLastMutation,
         onLogSection2: logSection2,
+        onLogSection2Blueprint: logSection2Blueprint,
         onLogPageBrief: logPageBrief,
       },
     });
   }
 
-  function syncFloatingPanel() {
+  function runUiSync() {
     syncButtons();
+  }
+
+  function scheduleUiSync() {
+    if (uiSyncQueued) {
+      return;
+    }
+
+    uiSyncQueued = true;
+    window.requestAnimationFrame(() => {
+      uiSyncQueued = false;
+      runUiSync();
+    });
   }
 
   window.Statamic.booting(() => {
     console.info('[SectionTools] Statamic.booting fired');
 
-    syncButtons();
-    syncFloatingPanel();
+    runUiSync();
 
     window.addEventListener('resize', () => {
       persistPanelPositionOnResize(panelStorageKey);
     });
 
     const observer = new MutationObserver(() => {
-      syncButtons();
-      syncFloatingPanel();
+      scheduleUiSync();
     });
 
     observer.observe(document.body, {
