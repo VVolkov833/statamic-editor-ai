@@ -570,6 +570,123 @@ function normalizeScalarValue(value) {
   return null;
 }
 
+function toPlainText(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  const text = String(value)
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/["'`´“”„«»]/g, '')
+    .replace(/\r?\n|\r/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return text || null;
+}
+
+function getOptionLabel(option, raw) {
+  if (!option) {
+    return null;
+  }
+
+  const candidate = String(raw);
+
+  if (typeof option === 'string') {
+    return option === candidate ? option : null;
+  }
+
+  if (option && typeof option === 'object') {
+    if (Object.prototype.hasOwnProperty.call(option, candidate)) {
+      return toPlainText(option[candidate]);
+    }
+
+    const optionKey = option.key ?? option.value ?? option.handle ?? option.id;
+    if (optionKey !== undefined && String(optionKey) === candidate) {
+      return toPlainText(option.value ?? option.label ?? option.title ?? optionKey);
+    }
+  }
+
+  return null;
+}
+
+function resolveOptionValue(rawValue, fieldConfig) {
+  if (rawValue === null || rawValue === undefined || rawValue === '' || rawValue === false) {
+    return null;
+  }
+
+  const options = fieldConfig?.options;
+  const optionList = Array.isArray(options)
+    ? options
+    : (options && typeof options === 'object' ? [options] : []);
+
+  if (Array.isArray(rawValue)) {
+    const labels = rawValue
+      .map((item) => {
+        if (item === null || item === undefined || item === '' || item === false) {
+          return null;
+        }
+
+        const found = optionList
+          .map((option) => getOptionLabel(option, item))
+          .find(Boolean);
+
+        return found ?? toPlainText(item);
+      })
+      .filter(Boolean);
+
+    return labels.length > 0 ? labels.join(' ') : null;
+  }
+
+  const found = optionList
+    .map((option) => getOptionLabel(option, rawValue))
+    .find(Boolean);
+
+  return found ?? toPlainText(rawValue);
+}
+
+function flattenToPlainText(value, seen = new Set()) {
+  if (value === null || value === undefined || value === '' || value === false) {
+    return '';
+  }
+
+  if (typeof value === 'string' || typeof value === 'number') {
+    return toPlainText(value) ?? '';
+  }
+
+  if (typeof value === 'boolean') {
+    return value ? 'true' : '';
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => flattenToPlainText(item, seen))
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+  }
+
+  if (typeof value === 'object') {
+    if (seen.has(value)) {
+      return '';
+    }
+
+    seen.add(value);
+
+    const text = Object.entries(value)
+      .filter(([key]) => !['_id', 'id', 'type', 'enabled', 'display'].includes(key))
+      .map(([, nested]) => flattenToPlainText(nested, seen))
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+
+    seen.delete(value);
+    return text;
+  }
+
+  return '';
+}
+
 function buildSetPreviewText(previews, setConfig, showFieldPreviews = true) {
   if (!previews || typeof previews !== 'object') {
     return '';
@@ -846,54 +963,54 @@ function extractFieldValue(handle, rawValue, fieldConfig, context) {
   const fieldType = typeof fieldConfig?.type === 'string' ? fieldConfig.type : '';
   const fieldDisplay = fieldConfig?.display ?? humanizeHandle(handle);
 
-  // Skip these field types entirely (except code which gets a note)
-  if (['code', 'revealer', 'width', 'icon', 'float', 'integer', 'collections', 'navs', 'structures', 'taxonomies', 'taxonomy_terms', 'user_groups', 'user_roles', 'users', 'array'].includes(fieldType)) {
-    if (fieldType === 'code') {
-      return `[${fieldDisplay}: code section]`;
-    }
-
+  if (rawValue === null || rawValue === undefined || rawValue === '' || rawValue === false) {
     return null;
   }
 
-  // Markdown → strip to plain text
+  // Skip these field types entirely (except code which gets a note)
+  if (['code', 'revealer', 'width', 'icon', 'float', 'integer', 'collections', 'navs', 'structures', 'taxonomies', 'taxonomy_terms', 'user_groups', 'user_roles', 'users', 'array', 'entries', 'sites', 'form'].includes(fieldType)) {
+    return null;
+  }
+
+  // Text-like fields -> plain single-line text.
+  if (fieldType === 'bard' || (Array.isArray(rawValue) && rawValue[0]?.type === 'paragraph')) {
+    return toPlainText(extractProseMirrorText(rawValue, context));
+  }
+
+  // Markdown -> strip to plain text
   if (fieldType === 'markdown' && typeof rawValue === 'string') {
-    const plaintext = rawValue.replace(/[#*_`\[\]()]/g, '').trim();
-    return plaintext || null;
+    return toPlainText(rawValue.replace(/[#*_`\[\]()]/g, ' '));
   }
 
-  // Text → plain text
+  // Text -> plain text
   if (fieldType === 'text' && typeof rawValue === 'string') {
-    return rawValue.trim() || null;
+    return toPlainText(rawValue);
   }
 
-  // Textarea → plain text
+  // Textarea -> plain text
   if (fieldType === 'textarea' && typeof rawValue === 'string') {
-    return rawValue.trim() || null;
+    return toPlainText(rawValue);
   }
 
-  // Table → convert to plain text
+  // Table -> sequential plain text
   if (fieldType === 'table') {
-    return extractTableText(rawValue);
+    return toPlainText(extractTableText(rawValue));
   }
 
   // Color → as plain text
   if (fieldType === 'color' && typeof rawValue === 'string') {
-    return rawValue.trim() || null;
+    return toPlainText(rawValue);
   }
 
   // Date → as plain text
   if (fieldType === 'date' && typeof rawValue === 'string') {
-    return rawValue.trim() || null;
+    return toPlainText(rawValue);
   }
 
   // Hidden → print value or default
   if (fieldType === 'hidden') {
     const value = rawValue ?? fieldConfig?.default;
-    if (value !== null && value !== undefined) {
-      return typeof value === 'string' ? value.trim() : String(value);
-    }
-
-    return null;
+    return toPlainText(value);
   }
 
   // HTML → if not script/style, plain text
@@ -903,24 +1020,23 @@ function extractFieldValue(handle, rawValue, fieldConfig, context) {
       return null;
     }
 
-    const plaintext = rawValue.replace(/<[^>]*>/g, '').trim();
-    return plaintext || null;
+    return toPlainText(rawValue);
   }
 
   // YAML → plain text
   if (fieldType === 'yaml' && typeof rawValue === 'string') {
-    return rawValue.trim() || null;
+    return toPlainText(rawValue);
   }
 
   // Video → URL/value text
   if (fieldType === 'video' && typeof rawValue === 'string') {
-    return rawValue.trim() || null;
+    return toPlainText(rawValue);
   }
 
-  // Link → include available text/url parts.
+  // Link -> include available text/url parts.
   if (fieldType === 'link') {
     if (typeof rawValue === 'string') {
-      return rawValue.trim() || null;
+      return toPlainText(rawValue);
     }
 
     if (rawValue && typeof rawValue === 'object') {
@@ -934,129 +1050,56 @@ function extractFieldValue(handle, rawValue, fieldConfig, context) {
         .filter((part) => typeof part === 'string' && part.trim())
         .map((part) => part.trim());
 
-      return parts.length > 0 ? [...new Set(parts)].join(' ') : null;
+      return parts.length > 0 ? toPlainText([...new Set(parts)].join(' ')) : null;
     }
   }
 
-  // Entries → headlines if possible
-  if (fieldType === 'entries' && Array.isArray(rawValue)) {
-    const entries = rawValue
-      .map((entryId) => {
-        if (typeof entryId !== 'string' || !entryId.trim()) {
-          return null;
-        }
-
-        const preview = findEntryPreviewById(context.publishMeta, entryId);
-        const previewText = normalizePreviewValue(preview);
-
-        return previewText || entryId;
-      })
-      .filter(Boolean);
-
-    return entries.length > 0 ? entries.join(', ') : null;
+  // Option-like fields -> selected option content.
+  if (['select', 'radio', 'button_group', 'dictionary', 'range'].includes(fieldType)) {
+    return resolveOptionValue(rawValue, fieldConfig);
   }
 
-  // Sites → headlines if possible
-  if (fieldType === 'sites' && Array.isArray(rawValue)) {
-    const sites = rawValue
-      .map((site) => {
-        if (typeof site === 'string') {
-          return site.trim();
-        }
-
-        if (site && typeof site === 'object' && typeof site.name === 'string') {
-          return site.name.trim();
-        }
-
-        return null;
-      })
-      .filter(Boolean);
-
-    return sites.length > 0 ? sites.join(', ') : null;
+  // Checkbox/Toggle -> print value label when enabled/selected.
+  if (fieldType === 'toggle') {
+    return rawValue ? fieldDisplay : null;
   }
 
-  // "Like label" fields: display + handle + value
-  const likeLabel = ['button_group', 'checkbox', 'dictionary', 'radio', 'range', 'select', 'toggle', 'assets', 'form', 'list'].includes(fieldType);
-  if (likeLabel) {
-    const labelPrefix = `${fieldDisplay} (${handle})`;
-
+  if (fieldType === 'checkbox') {
     if (Array.isArray(rawValue)) {
-      if (fieldType === 'assets') {
-        const urls = extractAssetUrls(rawValue, context);
-        return urls.length > 0 ? `${labelPrefix}: ${urls.join(', ')}` : null;
-      }
-
-      const labels = rawValue
-        .map((item) => {
-          if (typeof item === 'string') {
-            return item;
-          }
-
-          if (item && typeof item === 'object') {
-            return item.label ?? item.value ?? item.title ?? JSON.stringify(item);
-          }
-
-          return String(item);
-        })
-        .map((value) => (typeof value === 'string' ? value.trim() : value))
-        .filter(Boolean);
-
-      return labels.length > 0 ? `${labelPrefix}: ${labels.join(', ')}` : null;
+      return resolveOptionValue(rawValue, fieldConfig);
     }
 
-    if (fieldType === 'toggle') {
-      return `${labelPrefix}: ${rawValue ? 'yes' : 'no'}`;
-    }
-
-    if (fieldType === 'assets') {
-      const urls = extractAssetUrls(rawValue, context);
-      return urls.length > 0 ? `${labelPrefix}: ${urls.join(', ')}` : null;
-    }
-
-    if (rawValue !== null && rawValue !== undefined && rawValue !== '') {
-      return `${labelPrefix}: ${String(rawValue)}`;
-    }
-
-    return null;
+    return rawValue ? fieldDisplay : null;
   }
 
-  // Assets fallback → show actual values/URLs
+  // Assets -> keep resolved values.
   if (fieldType === 'assets' || handle === 'medium') {
     const urls = extractAssetUrls(rawValue, context);
-    return urls.length > 0 ? urls.join(', ') : null;
-  }
-
-  if (rawValue === null || rawValue === undefined) {
-    return null;
-  }
-
-  const handleName = (handle ?? '').toLowerCase();
-
-  if (fieldType === 'bard' || (Array.isArray(rawValue) && rawValue[0]?.type === 'paragraph')) {
-    const text = extractProseMirrorText(rawValue, context);
-    return text || null;
-  }
-
-  if (handleName === 'buttons' && Array.isArray(rawValue)) {
-    const buttons = rawValue
-      .map((button) => buildButtonItemData(button, context))
-      .filter(Boolean);
-
-    return buttons.length > 0 ? buttons : null;
+    return urls.length > 0 ? toPlainText(urls.join(' ')) : null;
   }
 
   if (fieldType === 'replicator' && Array.isArray(rawValue)) {
     const replicatorSetConfigs = getReplicatorSetConfigs(fieldConfig);
-    const items = rawValue
-      .map((item) => buildItemBrief(item, context, replicatorSetConfigs))
-      .filter(Boolean);
+    const merged = rawValue
+      .map((item) => {
+        if (!item || typeof item !== 'object') {
+          return null;
+        }
 
-    return items.length > 0 ? items : null;
+        const setType = item.type;
+        const setConfig = setType ? replicatorSetConfigs[setType] : null;
+        const nested = buildFieldsBrief(item, setConfig?.fields, context);
+        return flattenToPlainText(nested);
+      })
+      .filter(Boolean)
+      .join(' ');
+
+    return toPlainText(merged);
   }
 
   if (fieldType === 'group' && rawValue && typeof rawValue === 'object') {
     const nested = buildFieldsBrief(rawValue, fieldConfig?.fields, context);
-    return Object.keys(nested).length > 0 ? nested : null;
+    return toPlainText(flattenToPlainText(nested));
   }
 
   if (fieldType === 'grid' && Array.isArray(rawValue)) {
@@ -1067,44 +1110,32 @@ function extractFieldValue(handle, rawValue, fieldConfig, context) {
         }
 
         const nested = buildFieldsBrief(row, fieldConfig?.fields, context);
-        return Object.keys(nested).length > 0 ? nested : null;
+        return flattenToPlainText(nested);
       })
       .filter(Boolean);
 
-    return rows.length > 0 ? rows : null;
+    return rows.length > 0 ? toPlainText(rows.join(' ')) : null;
   }
 
   if (Array.isArray(rawValue)) {
     const assets = extractAssetUrls(rawValue, context);
     if (assets.length > 0) {
-      return assets;
+      return toPlainText(assets.join(' '));
     }
 
-    const list = rawValue
-      .map((item) => {
-        if (typeof item === 'object' && item?.type) {
-          const brief = buildItemBrief(item, context);
-          return brief || null;
-        }
-
-        const scalar = normalizeScalarValue(item);
-        return scalar === null ? null : scalar;
-      })
-      .filter((item) => item !== null);
-
-    return list.length > 0 ? list : null;
+    return toPlainText(flattenToPlainText(rawValue));
   }
 
   if (rawValue && typeof rawValue === 'object') {
     const nested = buildFieldsBrief(rawValue, fieldConfig?.fields, context);
     if (Object.keys(nested).length > 0) {
-      return nested;
+      return toPlainText(flattenToPlainText(nested));
     }
 
-    return extractFallbackObjectText(rawValue, context);
+    return toPlainText(extractFallbackObjectText(rawValue, context));
   }
 
-  return normalizeScalarValue(rawValue);
+  return toPlainText(normalizeScalarValue(rawValue));
 }
 
 function buildFieldsBrief(values, fieldEntries, context) {
@@ -1303,7 +1334,6 @@ function buildItemBrief(item, context, configMap = null) {
     const fieldConfig = fieldEntry?.field && typeof fieldEntry.field === 'object'
       ? { ...fieldEntry.field, ...(fieldEntry?.config ?? {}) }
       : { ...(fieldEntry?.config ?? {}) };
-    const fieldType = fieldConfig?.type ?? '';
     const value = extractFieldValue(handle, item[handle], fieldConfig, context);
 
     if (value === null) {
@@ -1320,56 +1350,9 @@ function buildItemBrief(item, context, configMap = null) {
       textParts.push(value.trim());
     }
 
-    if (typeof value === 'number' || typeof value === 'boolean') {
-      textParts.push(String(value));
-    }
-
-    if (Array.isArray(value)) {
-      const rendered = value
-        .map((entry) => {
-          if (typeof entry === 'string') {
-            return entry.trim();
-          }
-
-          if (entry && typeof entry === 'object') {
-            if (typeof entry.text === 'string' && entry.text.trim()) {
-              return entry.text.trim();
-            }
-
-            if (typeof entry.preview === 'string' && entry.preview.trim()) {
-              return entry.preview.trim();
-            }
-
-            return extractFallbackObjectText(entry, context);
-          }
-
-          return null;
-        })
-        .filter(Boolean)
-        .join(' ')
-        .trim();
-
-      if (rendered) {
-        textParts.push(rendered);
-      }
-    }
-
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
-      const rendered = extractFallbackObjectText(value, context);
-      if (rendered) {
-        textParts.push(rendered);
-      }
-    }
-
-    if (fieldType === 'toggle') {
-      const label = fieldEntry?.field?.display ?? humanizeHandle(handle);
-      const toggleValue = value ? 'yes' : 'no';
-      textParts.push(`${label}: ${toggleValue}`);
-    }
-
-    if (fieldType === 'select' && typeof item[handle] === 'string') {
-      const label = fieldEntry?.field?.display ?? humanizeHandle(handle);
-      textParts.push(`${label}: ${item[handle]}`);
+    const plain = toPlainText(value);
+    if (plain) {
+      textParts.push(plain);
     }
   }
 
