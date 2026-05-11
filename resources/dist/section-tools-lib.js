@@ -830,10 +830,23 @@ function extractProseMirrorText(nodes, context) {
 }
 
 function buildTileBrief(tile, context) {
-  const brief = { type: tile.type, _id: tile._id };
+  if (!tile || typeof tile !== 'object') {
+    return null;
+  }
 
-  if (Array.isArray(tile.text) && tile.text.length > 0) {
-    brief.text = extractProseMirrorText(tile.text, context);
+  const brief = { type: tile.type, _id: tile._id };
+  const tileConfig = tile.type ? context.setConfigs[tile.type] : null;
+  const tileFields = buildFieldsBrief(tile, tileConfig?.fields, context);
+  const tileText = toPlainText(flattenToPlainText(tileFields));
+
+  if (Object.keys(tileFields).length > 0) {
+    brief.fields = tileFields;
+  }
+
+  if (tileText) {
+    brief.text = tileText;
+  } else if (Array.isArray(tile.text) && tile.text.length > 0) {
+    brief.text = toPlainText(extractProseMirrorText(tile.text, context));
   }
 
   return brief;
@@ -1198,29 +1211,11 @@ function buildItemBrief(item, context, configMap = null) {
     brief.display = itemConfig.display;
   }
 
-  const textParts = [];
   const fieldConfigs = Array.isArray(itemConfig?.fields) ? itemConfig.fields : [];
   const extractedFields = {};
 
   if (Array.isArray(item.tiles) && !brief.tiles) {
     brief.tiles = item.tiles.map((tile) => buildTileBrief(tile, context));
-  }
-
-  if (item.type === 'quote') {
-    if (typeof item.text === 'string' && item.text.trim()) {
-      textParts.push(toPlainText(item.text));
-    }
-
-    if (typeof item.author === 'string' && item.author.trim()) {
-      textParts.push(toPlainText(item.author));
-    }
-  }
-
-  if (Array.isArray(item.text) && !brief.text) {
-    const text = extractProseMirrorText(item.text, context);
-    if (text) {
-      textParts.push(text);
-    }
   }
 
   if (item.type === 'medium') {
@@ -1233,69 +1228,6 @@ function buildItemBrief(item, context, configMap = null) {
       if (mediumUrls.length > 1) {
         brief.medium_urls = mediumUrls;
       }
-    }
-  }
-
-  if (item.type === 'call_to_action') {
-    if (typeof item.text === 'string' && item.text.trim()) {
-      textParts.push(toPlainText(item.text));
-    }
-
-    if (Array.isArray(item.buttons)) {
-      const buttonLabels = item.buttons
-        .map((btn) => {
-          if (btn.type === 'button_custom' && typeof btn.title === 'string') {
-            return btn.title.trim();
-          }
-
-          return '';
-        })
-        .filter(Boolean);
-
-      if (buttonLabels.length > 0) {
-        textParts.push(toPlainText(buttonLabels.join(' ')));
-      }
-    }
-  }
-
-  if (item.type === 'treatments') {
-    if (typeof item.headline === 'string' && item.headline.trim()) {
-      textParts.push(toPlainText(item.headline));
-    }
-
-    if (Array.isArray(item.treatments)) {
-      item.treatments.forEach((treatment) => {
-        if (Array.isArray(treatment.treatment)) {
-          treatment.treatment.forEach((t) => {
-            if (typeof t.title === 'string' && t.title.trim()) {
-              textParts.push(toPlainText(t.title));
-            }
-
-            if (Array.isArray(t.text)) {
-              const text = extractProseMirrorText(t.text, context);
-              if (text) {
-                textParts.push(toPlainText(text));
-              }
-            }
-          });
-        }
-      });
-    }
-  }
-
-  if (item.type === 'contact_form') {
-    if (typeof item.headline === 'string' && item.headline.trim()) {
-      textParts.push(toPlainText(item.headline));
-    }
-
-    if (typeof item.text === 'string' && item.text.trim()) {
-      textParts.push(toPlainText(item.text));
-    }
-  }
-
-  if (item.type === 'testimonials') {
-    if (typeof item.headline === 'string' && item.headline.trim()) {
-      textParts.push(toPlainText(item.headline));
     }
   }
 
@@ -1315,27 +1247,20 @@ function buildItemBrief(item, context, configMap = null) {
     }
 
     extractedFields[handle] = value;
-
-    if (['headline', 'text', 'medium', 'buttons', 'treatments', 'testimonials'].includes(handle)) {
-      continue;
-    }
-
-    if (typeof value === 'string' && value.trim()) {
-      textParts.push(value.trim());
-    }
-
-    const plain = toPlainText(value);
-    if (plain) {
-      textParts.push(plain);
-    }
   }
 
   if (Object.keys(extractedFields).length > 0) {
     brief.fields = extractedFields;
   }
 
-  if (textParts.length > 0) {
-    brief.text = textParts.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+  const textFromFields = toPlainText(flattenToPlainText(extractedFields));
+  if (textFromFields) {
+    brief.text = textFromFields;
+  } else {
+    const fallbackText = toPlainText(extractFallbackObjectText(item, context));
+    if (fallbackText) {
+      brief.text = fallbackText;
+    }
   }
 
   return brief;
