@@ -21,6 +21,7 @@ function appendDefaultActionButtons(container, actions) {
   container.appendChild(createButton('unde', actions.onUndo));
   container.appendChild(createButton('Log §2', actions.onLogSection2));
   container.appendChild(createButton('Log §2 Blueprint', actions.onLogSection2Blueprint));
+  container.appendChild(createButton('Log Page Brief', actions.onLogPageBrief));
 }
 
 function createButtonGroup(actions) {

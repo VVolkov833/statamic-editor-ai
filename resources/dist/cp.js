@@ -4,6 +4,7 @@ import {
   cloneThirdSectionAfterwards as libCloneThirdSectionAfterwards,
   getPublishStore as libGetPublishStore,
   getSections as libGetSections,
+  buildPageBrief,
 } from './section-tools-lib';
 import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tools-panel';
 
@@ -542,6 +543,28 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
     logSectionById(id);
   }
 
+  function logPageBrief() {
+    const publishStore = libGetPublishStore(window.Statamic);
+    const values = publishStore?.values;
+
+    if (!values) {
+      window.Statamic.$toast.error('Publish state wurde nicht gefunden.');
+      return;
+    }
+
+    const pageBrief = buildPageBrief(values, {
+      statamic: window.Statamic,
+      publishMeta: publishStore?.meta,
+    });
+
+    if (!pageBrief) {
+      window.Statamic.$toast.error('Page brief konnte nicht erstellt werden.');
+      return;
+    }
+
+    console.log('[SectionTools] Page brief:', JSON.stringify(pageBrief, null, 2));
+  }
+
 
 
   function logSectionBlueprintById(sectionId) {
@@ -631,6 +654,7 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
   window.SectionTools = window.SectionTools ?? {};
   window.SectionTools.logSectionById = logSectionById;
   window.SectionTools.logBlueprintById = logSectionBlueprintById;
+  window.SectionTools.logPageBrief = logPageBrief;
 
   function createButton(label, onClick) {
     const button = document.createElement('button');
@@ -872,6 +896,7 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
         onUndo: undoLastMutation,
         onLogSection2: logSection2,
         onLogSection2Blueprint: logSection2Blueprint,
+        onLogPageBrief: logPageBrief,
       },
     });
   }

@@ -611,7 +611,12 @@ function getOptionLabel(option, raw) {
 }
 
 function resolveOptionValue(rawValue, fieldConfig) {
-  if (rawValue === null || rawValue === undefined || rawValue === '' || rawValue === false) {
+  if (
+    rawValue === null
+    || rawValue === undefined
+    || rawValue === ''
+    || (rawValue === false && !['toggle', 'checkbox'].includes(fieldType))
+  ) {
     return null;
   }
 
@@ -635,7 +640,7 @@ function resolveOptionValue(rawValue, fieldConfig) {
       })
       .filter(Boolean);
 
-    return labels.length > 0 ? labels.join(' ') : null;
+    return labels.length > 0 ? labels.join(', ') : null;
   }
 
   const found = optionList
@@ -643,6 +648,36 @@ function resolveOptionValue(rawValue, fieldConfig) {
     .find(Boolean);
 
   return found ?? toPlainText(rawValue);
+}
+
+function makeFieldId(ownerId, handle) {
+  const owner = typeof ownerId === 'string' && ownerId.trim() ? ownerId.trim() : 'root';
+  return `${owner}.${handle}`;
+}
+
+function inferFieldType(rawValue) {
+  if (Array.isArray(rawValue)) {
+    return 'array';
+  }
+
+  if (rawValue && typeof rawValue === 'object') {
+    return 'object';
+  }
+
+  return typeof rawValue;
+}
+
+function buildFieldData(ownerId, handle, fieldConfig, rawValue, value) {
+  const fieldId = makeFieldId(ownerId, handle);
+  const fieldType = typeof fieldConfig?.type === 'string' && fieldConfig.type
+    ? fieldConfig.type
+    : inferFieldType(rawValue);
+
+  return {
+    id: fieldId,
+    type: fieldType,
+    value,
+  };
 }
 
 function flattenToPlainText(value, seen = new Set()) {
@@ -667,6 +702,11 @@ function flattenToPlainText(value, seen = new Set()) {
   }
 
   if (typeof value === 'object') {
+    if (Object.prototype.hasOwnProperty.call(value, 'id')
+      && Object.prototype.hasOwnProperty.call(value, 'value')) {
+      return flattenToPlainText(value.value, seen);
+    }
+
     if (seen.has(value)) {
       return '';
     }
@@ -674,7 +714,7 @@ function flattenToPlainText(value, seen = new Set()) {
     seen.add(value);
 
     const text = Object.entries(value)
-      .filter(([key]) => !['_id', 'id', 'type', 'enabled', 'display'].includes(key))
+      .filter(([key]) => !['_id', 'id', 'type', 'enabled', 'display', 'label'].includes(key))
       .map(([, nested]) => flattenToPlainText(nested, seen))
       .filter(Boolean)
       .join(' ')
@@ -758,29 +798,9 @@ function extractSetValueBrief(setType, values, context, setId) {
     return '';
   }
 
-  const parts = [];
-
-  if (setType === 'buttons' && Array.isArray(values.buttons)) {
-    const buttonLabels = values.buttons
-      .map((item) => buildButtonItemBrief(item, context))
-      .filter(Boolean);
-
-    if (buttonLabels.length > 0) {
-      parts.push(buttonLabels.join(' '));
-    }
-  }
-
-  if (setType === 'accordion' && Array.isArray(values.entries)) {
-    const entryLabels = values.entries
-      .map((entry) => buildAccordionEntryBrief(entry, context))
-      .filter(Boolean);
-
-    if (entryLabels.length > 0) {
-      parts.push(entryLabels.join(' '));
-    }
-  }
-
-  return parts.join(' ').trim();
+  const setConfig = context.setConfigs[setType] ?? null;
+  const nested = buildFieldsBrief(values, setConfig?.fields, context, setId ? `set:${setId}` : `set:${setType}`);
+  return flattenToPlainText(nested);
 }
 
 function renderSetLabel(node, context) {
@@ -836,7 +856,8 @@ function buildTileBrief(tile, context) {
 
   const brief = { type: tile.type, _id: tile._id };
   const tileConfig = tile.type ? context.setConfigs[tile.type] : null;
-  const tileFields = buildFieldsBrief(tile, tileConfig?.fields, context);
+  const tileId = tile._id ?? tile.id ?? `tile:${tile.type ?? 'set'}`;
+  const tileFields = buildFieldsBrief(tile, tileConfig?.fields, context, String(tileId));
   const tileText = toPlainText(flattenToPlainText(tileFields));
   const tileFallbackText = toPlainText(extractFallbackObjectText(tile, context));
 
@@ -978,16 +999,17 @@ function extractTableText(value) {
   return lines.length > 0 ? lines.join('\n') : null;
 }
 
-function extractFieldValue(handle, rawValue, fieldConfig, context) {
+function extractFieldValue(handle, rawValue, fieldConfig, context, ownerId = 'root') {
   const fieldType = typeof fieldConfig?.type === 'string' ? fieldConfig.type : '';
   const fieldDisplay = fieldConfig?.display ?? humanizeHandle(handle);
+  const fieldId = makeFieldId(ownerId, handle);
 
   if (rawValue === null || rawValue === undefined || rawValue === '' || rawValue === false) {
     return null;
   }
 
   // Skip these field types entirely (except code which gets a note)
-  if (['code', 'revealer', 'width', 'icon', 'float', 'integer', 'collections', 'navs', 'structures', 'taxonomies', 'taxonomy_terms', 'user_groups', 'user_roles', 'users', 'array', 'entries', 'sites', 'form'].includes(fieldType)) {
+  if (['code', 'revealer', 'width', 'icon', 'float', 'integer', 'collections', 'navs', 'structures', 'taxonomies', 'taxonomy_terms', 'user_groups', 'user_roles', 'users', 'array', 'sites', 'form'].includes(fieldType)) {
     return null;
   }
 
@@ -1080,7 +1102,10 @@ function extractFieldValue(handle, rawValue, fieldConfig, context) {
 
   // Checkbox/Toggle -> print value label when enabled/selected.
   if (fieldType === 'toggle') {
-    return rawValue ? fieldDisplay : null;
+    return {
+      label: fieldDisplay,
+      value: Boolean(rawValue),
+    };
   }
 
   if (fieldType === 'checkbox') {
@@ -1088,7 +1113,10 @@ function extractFieldValue(handle, rawValue, fieldConfig, context) {
       return resolveOptionValue(rawValue, fieldConfig);
     }
 
-    return rawValue ? fieldDisplay : null;
+    return {
+      label: fieldDisplay,
+      value: Boolean(rawValue),
+    };
   }
 
   // Assets -> keep resolved values.
@@ -1099,41 +1127,44 @@ function extractFieldValue(handle, rawValue, fieldConfig, context) {
 
   if (fieldType === 'replicator' && Array.isArray(rawValue)) {
     const replicatorSetConfigs = getReplicatorSetConfigs(fieldConfig);
-    const merged = rawValue
-      .map((item) => {
+    return rawValue
+      .map((item, index) => {
         if (!item || typeof item !== 'object') {
           return null;
         }
 
         const setType = item.type;
         const setConfig = setType ? replicatorSetConfigs[setType] : null;
-        const nested = buildFieldsBrief(item, setConfig?.fields, context);
-        return flattenToPlainText(nested);
-      })
-      .filter(Boolean)
-      .join(' ');
+        const itemId = item._id ?? item.id ?? `${fieldId}[${index}]`;
 
-    return toPlainText(merged);
+        return {
+          id: String(itemId),
+          type: setType ?? null,
+          display: setConfig?.display ?? null,
+          fields: buildFieldsBrief(item, setConfig?.fields, context, String(itemId)),
+        };
+      })
+      .filter(Boolean);
   }
 
   if (fieldType === 'group' && rawValue && typeof rawValue === 'object') {
-    const nested = buildFieldsBrief(rawValue, fieldConfig?.fields, context);
-    return toPlainText(flattenToPlainText(nested));
+    return buildFieldsBrief(rawValue, fieldConfig?.fields, context, fieldId);
   }
 
   if (fieldType === 'grid' && Array.isArray(rawValue)) {
-    const rows = rawValue
-      .map((row) => {
+    return rawValue
+      .map((row, index) => {
         if (!row || typeof row !== 'object') {
           return null;
         }
 
-        const nested = buildFieldsBrief(row, fieldConfig?.fields, context);
-        return flattenToPlainText(nested);
+        const rowId = row._id ?? row.id ?? `${fieldId}[${index}]`;
+        return {
+          id: String(rowId),
+          fields: buildFieldsBrief(row, fieldConfig?.fields, context, String(rowId)),
+        };
       })
       .filter(Boolean);
-
-    return rows.length > 0 ? toPlainText(rows.join(' ')) : null;
   }
 
   if (Array.isArray(rawValue)) {
@@ -1146,9 +1177,9 @@ function extractFieldValue(handle, rawValue, fieldConfig, context) {
   }
 
   if (rawValue && typeof rawValue === 'object') {
-    const nested = buildFieldsBrief(rawValue, fieldConfig?.fields, context);
+    const nested = buildFieldsBrief(rawValue, fieldConfig?.fields, context, fieldId);
     if (Object.keys(nested).length > 0) {
-      return toPlainText(flattenToPlainText(nested));
+      return nested;
     }
 
     return toPlainText(extractFallbackObjectText(rawValue, context));
@@ -1157,7 +1188,7 @@ function extractFieldValue(handle, rawValue, fieldConfig, context) {
   return toPlainText(normalizeScalarValue(rawValue));
 }
 
-function buildFieldsBrief(values, fieldEntries, context) {
+function buildFieldsBrief(values, fieldEntries, context, ownerId = 'root') {
   if (!values || typeof values !== 'object') {
     return {};
   }
@@ -1175,9 +1206,10 @@ function buildFieldsBrief(values, fieldEntries, context) {
         ? { ...fieldEntry.field, ...(fieldEntry?.config ?? {}) }
         : { ...(fieldEntry?.config ?? {}) };
 
-      const value = extractFieldValue(handle, values[handle], fieldConfig, context);
+      const rawValue = values[handle];
+      const value = extractFieldValue(handle, rawValue, fieldConfig, context, ownerId);
       if (value !== null) {
-        result[handle] = value;
+        result[handle] = buildFieldData(ownerId, handle, fieldConfig, rawValue, value);
       }
     });
   }
@@ -1188,9 +1220,9 @@ function buildFieldsBrief(values, fieldEntries, context) {
         return;
       }
 
-      const extracted = extractFieldValue(handle, value, {}, context);
+      const extracted = extractFieldValue(handle, value, {}, context, ownerId);
       if (extracted !== null) {
-        result[handle] = extracted;
+        result[handle] = buildFieldData(ownerId, handle, {}, value, extracted);
       }
     });
   }
@@ -1219,6 +1251,7 @@ function buildItemBrief(item, context, configMap = null) {
 
   const fieldConfigs = Array.isArray(itemConfig?.fields) ? itemConfig.fields : [];
   const extractedFields = {};
+  const itemId = item._id ?? item.id ?? `item:${itemType ?? 'set'}`;
 
   if (Array.isArray(item.tiles) && !brief.tiles) {
     brief.tiles = item.tiles.map((tile) => buildTileBrief(tile, context));
@@ -1246,13 +1279,14 @@ function buildItemBrief(item, context, configMap = null) {
     const fieldConfig = fieldEntry?.field && typeof fieldEntry.field === 'object'
       ? { ...fieldEntry.field, ...(fieldEntry?.config ?? {}) }
       : { ...(fieldEntry?.config ?? {}) };
-    const value = extractFieldValue(handle, item[handle], fieldConfig, context);
+    const rawValue = item[handle];
+    const value = extractFieldValue(handle, rawValue, fieldConfig, context, String(itemId));
 
     if (value === null) {
       continue;
     }
 
-    extractedFields[handle] = value;
+    extractedFields[handle] = buildFieldData(String(itemId), handle, fieldConfig, rawValue, value);
   }
 
   if (Object.keys(extractedFields).length > 0) {
