@@ -615,7 +615,7 @@ function resolveOptionValue(rawValue, fieldConfig) {
     rawValue === null
     || rawValue === undefined
     || rawValue === ''
-    || (rawValue === false && !['toggle', 'checkbox'].includes(fieldType))
+    || (rawValue === false && !['toggle', 'checkbox'].includes(fieldConfig?.type))
   ) {
     return null;
   }
@@ -1273,6 +1273,11 @@ function buildItemBrief(item, context, configMap = null) {
   for (const fieldEntry of fieldConfigs) {
     const handle = fieldEntry?.handle;
     if (!handle) {
+      continue;
+    }
+
+    // For tile containers, the raw `fields.tiles` string duplicates `item.tiles` content.
+    if (handle === 'tiles' && Array.isArray(item.tiles)) {
       continue;
     }
 

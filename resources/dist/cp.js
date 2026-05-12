@@ -4,15 +4,14 @@ import {
   cloneThirdSectionAfterwards as libCloneThirdSectionAfterwards,
   getPublishStore as libGetPublishStore,
   getSections as libGetSections,
+  setSections,
+  getSectionId,
+  cloneValue,
   buildPageBrief,
 } from './section-tools-lib';
 import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tools-panel';
 
 (() => {
-  const BUTTON_GROUP_ID = 'section-tools-live-preview-buttons';
-  const PANEL_ID = 'section-tools-floating-panel';
-  const PANEL_HANDLE_ID = 'section-tools-floating-panel-handle';
-  const PANEL_MARGIN = 16;
   const MAX_UNDO_STEPS = 10;
   const viteHost = window.location.hostname || '127.0.0.1';
   const vitePort = window.location.port || '5173';
@@ -60,38 +59,6 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
   window.__sectionToolsLoaded = true;
   console.info('[SectionTools] cp.js loaded', window.location.pathname);
 
-  function getPublishModulesWithSections() {
-    const publish = window.Statamic?.$store?.state?.publish;
-    if (!publish) {
-      return [];
-    }
-
-    return Object.entries(publish)
-      .filter(([, moduleState]) => Array.isArray(moduleState?.values?.sections))
-      .map(([moduleName]) => moduleName);
-  }
-
-  function getPublishStore() {
-    const moduleNames = getPublishModulesWithSections();
-    if (moduleNames.length > 0) {
-      return window.Statamic?.$store?.state?.publish?.[moduleNames[0]] ?? null;
-    }
-
-    return window.Statamic?.$store?.state?.publish?.base ?? null;
-  }
-
-  function cloneValue(value) {
-    if (typeof structuredClone === 'function') {
-      return structuredClone(value);
-    }
-
-    return JSON.parse(JSON.stringify(value));
-  }
-
-  function getSections() {
-    return libGetSections(window.Statamic);
-  }
-
   function isPagesEntryScreen() {
     const isPagesCollectionRoute = window.location.pathname.includes('/collections/pages');
     const hasSectionsInPublishState = Array.isArray(libGetPublishStore(window.Statamic)?.values?.sections);
@@ -99,185 +66,8 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
     return isPagesCollectionRoute && hasSectionsInPublishState;
   }
 
-  function setSections(nextSections) {
-    const moduleNames = getPublishModulesWithSections();
-    if (moduleNames.length === 0) {
-      return false;
-    }
-
-    let applied = false;
-
-    for (const moduleName of moduleNames) {
-      const moduleState = window.Statamic?.$store?.state?.publish?.[moduleName];
-      if (!moduleState?.values) {
-        continue;
-      }
-
-      const safeSections = Array.isArray(nextSections) ? [...nextSections] : [];
-      const previousSections = Array.isArray(moduleState.values.sections)
-        ? moduleState.values.sections
-        : [];
-      const nextValues = {
-        ...moduleState.values,
-        sections: safeSections,
-      };
-
-      try {
-        window.Statamic.$store.commit(`publish/${moduleName}/setFieldValue`, {
-          handle: 'sections',
-          value: safeSections,
-        });
-        window.Statamic.$store.dispatch(`publish/${moduleName}/setFieldValue`, {
-          handle: 'sections',
-          value: safeSections,
-        });
-        applied = true;
-      } catch {
-        // Keep trying setValues and other modules.
-      }
-
-      try {
-        window.Statamic.$store.commit(`publish/${moduleName}/setValues`, nextValues);
-        window.Statamic.$store.dispatch(`publish/${moduleName}/setValues`, nextValues);
-
-        const nextMeta = syncSectionsMeta(moduleState.meta, previousSections, safeSections);
-        if (nextMeta) {
-          window.Statamic.$store.commit(`publish/${moduleName}/setMeta`, nextMeta);
-          window.Statamic.$store.dispatch(`publish/${moduleName}/setMeta`, nextMeta);
-        }
-
-        applied = true;
-      } catch {
-        // Keep trying other modules.
-      }
-    }
-
-    return applied;
-  }
-
-  function uid() {
-    const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
-    let value = '';
-
-    for (let i = 0; i < 8; i += 1) {
-      value += alphabet[Math.floor(Math.random() * alphabet.length)];
-    }
-
-    return value;
-  }
-
-  function getSectionId(section) {
-    return section?._id ?? section?.id ?? section?.key ?? null;
-  }
-
-  function getNodeId(node) {
-    return node?._id ?? node?.id ?? node?.key ?? node?.attrs?.id ?? null;
-  }
-
-  function buildDefaultPreview(section) {
-    if (section?.type === 'quote') {
-      return {
-        text: section?.text ?? null,
-        author: section?.author ?? null,
-        _: null,
-      };
-    }
-
-    return { _: null };
-  }
-
-  function syncSectionsMeta(meta, previousSections, nextSections) {
-    if (!meta?.sections || typeof meta.sections !== 'object') {
-      return meta;
-    }
-
-    const nextMeta = cloneValue(meta);
-    const sectionsMeta = nextMeta.sections;
-
-    sectionsMeta.existing = sectionsMeta.existing ?? {};
-    sectionsMeta.previews = sectionsMeta.previews ?? {};
-
-    const previousById = new Map((previousSections ?? [])
-      .map((section) => [getSectionId(section), section])
-      .filter(([id]) => Boolean(id)));
-
-    const existingIds = Object.keys(sectionsMeta.existing);
-
-    for (const section of nextSections) {
-      const id = getSectionId(section);
-      if (!id) {
-        continue;
-      }
-
-      if (!sectionsMeta.existing[id]) {
-        const templateId = existingIds.find((candidateId) => {
-          const candidateSection = previousById.get(candidateId);
-          return candidateSection?.type === section?.type;
-        }) ?? null;
-
-        sectionsMeta.existing[id] = templateId
-          ? cloneValue(sectionsMeta.existing[templateId])
-          : { _: '_' };
-      }
-
-      if (!sectionsMeta.previews[id]) {
-        const templateId = existingIds.find((candidateId) => {
-          const candidateSection = previousById.get(candidateId);
-          return candidateSection?.type === section?.type && sectionsMeta.previews[candidateId];
-        }) ?? null;
-
-        sectionsMeta.previews[id] = templateId
-          ? cloneValue(sectionsMeta.previews[templateId])
-          : buildDefaultPreview(section);
-      }
-
-      if (Array.isArray(sectionsMeta.collapsed) && !sectionsMeta.collapsed.includes(id)) {
-        sectionsMeta.collapsed.push(id);
-      }
-    }
-
-    return nextMeta;
-  }
-
-  function assignFreshSectionIdentity(section) {
-    const nextId = uid();
-
-    // Replicator items are keyed internally by `_id` in CP state.
-    section._id = nextId;
-
-    // Remove alternative identity keys to avoid mixed-shape items.
-    if ('id' in section) {
-      delete section.id;
-    }
-
-    if ('key' in section) {
-      delete section.key;
-    }
-  }
-
-  function createQuoteSet() {
-    const sections = getSections() ?? [];
-    const quoteTemplate = sections.find((section) => section?.type === 'quote');
-
-    const quote = quoteTemplate ? cloneValue(quoteTemplate) : {
-      _id: uid(),
-      type: 'quote',
-      enabled: true,
-      text: 'Test-Zitat aus Live Preview',
-      author: 'CP Test',
-    };
-
-    assignFreshSectionIdentity(quote);
-    quote.type = 'quote';
-    quote.enabled = typeof quote.enabled === 'boolean' ? quote.enabled : true;
-    quote.text = 'Test-Zitat aus Live Preview';
-    quote.author = 'CP Test';
-
-    return quote;
-  }
-
   function pushUndoSnapshot() {
-    const sections = getSections();
+    const sections = libGetSections(window.Statamic);
 
     if (!sections) {
       return false;
@@ -311,7 +101,7 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
   }
 
   function swapSections2And3() {
-    const sections = getSections();
+    const sections = libGetSections(window.Statamic);
 
     if (!sections) {
       window.Statamic.$toast.error('Publish state wurde nicht gefunden.');
@@ -337,7 +127,7 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
   }
 
   function cloneThirdSectionAfterwards() {
-    const sections = getSections();
+    const sections = libGetSections(window.Statamic);
 
     if (!sections) {
       window.Statamic.$toast.error('Publish state wurde nicht gefunden.');
@@ -372,7 +162,7 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
       return;
     }
 
-    if (setSections(previousSections)) {
+    if (setSections(window.Statamic, previousSections)) {
       window.Statamic.$toast.success('Letzte Mutation wurde rueckgaengig gemacht.');
       return;
     }
@@ -383,7 +173,7 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
   }
 
   function getSectionIdAtIndex(index) {
-    const sections = getSections();
+    const sections = libGetSections(window.Statamic);
     if (!sections || sections.length <= index) {
       return null;
     }
@@ -392,7 +182,7 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
   }
 
   function logSectionById(sectionId) {
-    const sections = getSections();
+    const sections = libGetSections(window.Statamic);
 
     if (!sections) {
       window.Statamic.$toast.error('Publish state wurde nicht gefunden.');
@@ -406,6 +196,10 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
     }
 
     console.log(`[SectionTools] Section (id: ${sectionId}):`, JSON.stringify(section, null, 2));
+  }
+
+  function getNodeId(node) {
+    return node?._id ?? node?.id ?? node?.key ?? node?.attrs?.id ?? null;
   }
 
   function findElementById(node, targetId, path = []) {
@@ -565,8 +359,6 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
     console.log('[SectionTools] Page brief:', JSON.stringify(pageBrief, null, 2));
   }
 
-
-
   function logSectionBlueprintById(sectionId) {
     const publishStore = libGetPublishStore(window.Statamic);
 
@@ -655,235 +447,6 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
   window.SectionTools.logSectionById = logSectionById;
   window.SectionTools.logBlueprintById = logSectionBlueprintById;
   window.SectionTools.logPageBrief = logPageBrief;
-
-  function createButton(label, onClick) {
-    const button = document.createElement('button');
-
-    button.type = 'button';
-    button.className = 'btn';
-    button.textContent = label;
-    button.addEventListener('click', onClick);
-
-    return button;
-  }
-
-  function appendDefaultActionButtons(container) {
-    container.appendChild(createButton('Quote +', insertQuoteAsSecondSection));
-    container.appendChild(createButton('Swap 2<->3', swapSections2And3));
-    container.appendChild(createButton('Clone 3 +1', cloneThirdSectionAfterwards));
-  }
-
-  function createButtonGroup() {
-    const wrapper = document.createElement('div');
-
-    wrapper.id = BUTTON_GROUP_ID;
-    wrapper.style.display = 'flex';
-    wrapper.style.gap = '0.5rem';
-
-    appendDefaultActionButtons(wrapper);
-
-    return wrapper;
-  }
-
-  function createPanelGroup() {
-    const wrapper = document.createElement('div');
-    wrapper.style.display = 'flex';
-    wrapper.style.gap = '6px';
-    wrapper.style.flexWrap = 'wrap';
-
-    appendDefaultActionButtons(wrapper);
-
-    return wrapper;
-  }
-
-  function readPanelPosition() {
-    try {
-      const raw = window.localStorage.getItem(panelStorageKey);
-      if (!raw) {
-        return null;
-      }
-
-      const parsed = JSON.parse(raw);
-      if (typeof parsed?.x !== 'number' || typeof parsed?.y !== 'number') {
-        return null;
-      }
-
-      return parsed;
-    } catch {
-      return null;
-    }
-  }
-
-  function writePanelPosition(position) {
-    try {
-      window.localStorage.setItem(panelStorageKey, JSON.stringify(position));
-    } catch {
-      // Ignore storage quota/privacy failures.
-    }
-  }
-
-  function getClampedPosition(panel, position) {
-    const maxX = Math.max(PANEL_MARGIN, window.innerWidth - panel.offsetWidth - PANEL_MARGIN);
-    const maxY = Math.max(PANEL_MARGIN, window.innerHeight - panel.offsetHeight - PANEL_MARGIN);
-
-    return {
-      x: Math.min(Math.max(PANEL_MARGIN, position.x), maxX),
-      y: Math.min(Math.max(PANEL_MARGIN, position.y), maxY),
-    };
-  }
-
-  function applyPanelPosition(panel, position) {
-    const next = getClampedPosition(panel, position);
-    panel.style.left = `${next.x}px`;
-    panel.style.top = `${next.y}px`;
-    return next;
-  }
-
-  function getDefaultPanelPosition(panel) {
-    return getClampedPosition(panel, {
-      x: window.innerWidth - panel.offsetWidth - 24,
-      y: 88,
-    });
-  }
-
-  function makePanelDraggable(panel, handle) {
-    let pointerId = null;
-    let deltaX = 0;
-    let deltaY = 0;
-
-    handle.addEventListener('pointerdown', (event) => {
-      pointerId = event.pointerId;
-      const rect = panel.getBoundingClientRect();
-      deltaX = event.clientX - rect.left;
-      deltaY = event.clientY - rect.top;
-      handle.setPointerCapture(pointerId);
-      document.body.style.userSelect = 'none';
-    });
-
-    handle.addEventListener('pointermove', (event) => {
-      if (event.pointerId !== pointerId) {
-        return;
-      }
-
-      applyPanelPosition(panel, {
-        x: event.clientX - deltaX,
-        y: event.clientY - deltaY,
-      });
-    });
-
-    function finishDrag(event) {
-      if (event.pointerId !== pointerId) {
-        return;
-      }
-
-      pointerId = null;
-      document.body.style.userSelect = '';
-      writePanelPosition({
-        x: panel.offsetLeft,
-        y: panel.offsetTop,
-      });
-    }
-
-    handle.addEventListener('pointerup', finishDrag);
-    handle.addEventListener('pointercancel', finishDrag);
-  }
-
-  function createFloatingPanel() {
-    const panel = document.createElement('div');
-    panel.id = PANEL_ID;
-    panel.style.position = 'fixed';
-    panel.style.zIndex = '2000';
-    panel.style.background = 'var(--bg, #fff)';
-    panel.style.border = '1px solid rgba(0, 0, 0, 0.12)';
-    panel.style.borderRadius = '10px';
-    panel.style.boxShadow = '0 8px 24px rgba(0, 0, 0, 0.16)';
-    panel.style.padding = '8px';
-    panel.style.display = 'flex';
-    panel.style.flexDirection = 'column';
-    panel.style.gap = '8px';
-
-    const handle = document.createElement('div');
-    handle.id = PANEL_HANDLE_ID;
-    handle.textContent = 'Editor AI Assistant';
-    handle.style.fontSize = '12px';
-    handle.style.fontWeight = '600';
-    handle.style.cursor = 'move';
-    handle.style.padding = '2px 4px';
-    handle.style.color = 'var(--text, #111)';
-
-    panel.appendChild(handle);
-    panel.appendChild(createPanelGroup());
-    makePanelDraggable(panel, handle);
-
-    return panel;
-  }
-
-  function mountFloatingPanel() {
-    if (!isPagesEntryScreen() || document.getElementById(PANEL_ID)) {
-      return;
-    }
-
-    const panel = createFloatingPanel();
-    document.body.appendChild(panel);
-
-    const savedPosition = readPanelPosition();
-    const initial = savedPosition ?? getDefaultPanelPosition(panel);
-    const applied = applyPanelPosition(panel, initial);
-
-    if (!savedPosition) {
-      writePanelPosition(applied);
-    }
-  }
-
-  function unmountFloatingPanelWhenOutOfScope() {
-    if (isPagesEntryScreen()) {
-      return;
-    }
-
-    const panel = document.getElementById(PANEL_ID);
-    if (panel) {
-      panel.remove();
-    }
-  }
-
-  function mountButtons() {
-    if (!isPagesEntryScreen()) {
-      return;
-    }
-
-    const livePreviewHeader = document.querySelector('.live-preview-header');
-
-    if (!livePreviewHeader || document.getElementById(BUTTON_GROUP_ID)) {
-      return;
-    }
-
-    const group = createButtonGroup();
-    const controls = livePreviewHeader.querySelector('.flex.items-center');
-    const closeButton = controls?.querySelector('.btn-close');
-
-    if (controls && closeButton) {
-      controls.insertBefore(group, closeButton);
-      return;
-    }
-
-    if (controls) {
-      controls.appendChild(group);
-      return;
-    }
-
-    livePreviewHeader.appendChild(group);
-  }
-
-  function unmountButtonsWhenOutOfScope() {
-    if (isPagesEntryScreen()) {
-      return;
-    }
-
-    const group = document.getElementById(BUTTON_GROUP_ID);
-    if (group) {
-      group.remove();
-    }
-  }
 
   function syncButtons() {
     syncSectionToolsUi({
