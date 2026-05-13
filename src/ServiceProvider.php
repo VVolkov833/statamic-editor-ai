@@ -3,6 +3,7 @@
 namespace Local\SectionTools;
 
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Route;
 use Statamic\Statamic;
 use Statamic\Providers\AddonServiceProvider;
@@ -15,6 +16,21 @@ class ServiceProvider extends AddonServiceProvider
         // The host app loads the CP script through its Vite pipeline in local development.
 
         Statamic::pushCpRoutes(function () {
+            Route::post('section-tools/ai/chat', function (Request $request) {
+                $messages = $request->json('messages', []);
+
+                $response = Http::withHeaders([
+                    'x-api-key'         => env('ANTHROPIC_API_KEY'),
+                    'anthropic-version' => '2023-06-01',
+                ])->post('https://api.anthropic.com/v1/messages', [
+                    'model'      => env('ANTHROPIC_MODEL', 'claude-sonnet-4-6'),
+                    'max_tokens' => (int) env('ANTHROPIC_MAX_TOKENS', 1024),
+                    'messages'   => $messages,
+                ]);
+
+                return response()->json($response->json(), $response->status());
+            });
+
             Route::get('section-tools/assets/search', function (Request $request) {
                 $query = strtolower(trim($request->get('query', '')));
 

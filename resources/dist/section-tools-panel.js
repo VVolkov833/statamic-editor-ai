@@ -1,3 +1,5 @@
+import { createChatSection } from './section-tools-chat.js';
+
 const PANEL_ID = 'section-tools-floating-panel';
 const PANEL_HANDLE_ID = 'section-tools-floating-panel-handle';
 const PANEL_MARGIN = 16;
@@ -137,6 +139,7 @@ function createFloatingPanel(actions, panelStorageKey) {
   panel.style.borderRadius = '10px';
   panel.style.boxShadow = '0 8px 24px rgba(0, 0, 0, 0.16)';
   panel.style.padding = '8px';
+  panel.style.minWidth = '300px';
   panel.style.display = 'flex';
   panel.style.flexDirection = 'column';
   panel.style.gap = '8px';
@@ -151,6 +154,7 @@ function createFloatingPanel(actions, panelStorageKey) {
   handle.style.color = 'var(--text, #111)';
 
   panel.appendChild(handle);
+  panel.appendChild(createChatSection());
   panel.appendChild(createPanelGroup(actions));
   makePanelDraggable(panel, handle, panelStorageKey);
 
