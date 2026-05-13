@@ -283,1081 +283,423 @@ export function swapSections2And3(statamic) {
   return swapSections(statamic, firstId, secondId);
 }
 
-function humanizeHandle(value) {
-  if (!value || typeof value !== 'string') {
-    return '';
-  }
+// ── BRIEF BUILDER ─────────────────────────────────────────────────────────
 
-  return value
-    .replace(/[_-]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/\b\w/g, (char) => char.toUpperCase());
+function cleanDisplay(display) {
+  if (typeof display !== 'string') return '';
+  // Strip trailing handle annotations: " _ [text]", " [accordion_image]", etc.
+  return display.replace(/\s*[_-]?\s*\[[\w_]+\]\s*$/, '').trim();
 }
 
-function collectSetConfigs(node, map) {
-  if (!node || typeof node !== 'object') {
-    return;
-  }
-
-  if (Array.isArray(node)) {
-    node.forEach((item) => collectSetConfigs(item, map));
-    return;
-  }
-
-  const looksLikeSetConfig = typeof node.handle === 'string'
-    && Array.isArray(node.fields)
-    && Object.prototype.hasOwnProperty.call(node, 'display');
-
-  if (looksLikeSetConfig && !map[node.handle]) {
-    map[node.handle] = {
-      display: node.display,
-      fields: node.fields,
-    };
-  }
-
-  for (const value of Object.values(node)) {
-    collectSetConfigs(value, map);
-  }
-}
-
-function getSetConfigs(statamic) {
-  const blueprint = getPublishStore(statamic)?.blueprint;
-  const map = {};
-
-  collectSetConfigs(blueprint, map);
-
-  return map;
-}
-
-function getReplicatorSetConfigs(fieldConfig) {
-  const sets = fieldConfig?.sets;
-  if (!sets || typeof sets !== 'object') {
-    return {};
-  }
-
-  const map = {};
-
-  Object.values(sets).forEach((group) => {
-    const groupSets = group?.sets;
-    if (!groupSets || typeof groupSets !== 'object') {
-      return;
-    }
-
-    Object.entries(groupSets).forEach(([setHandle, setConfig]) => {
-      if (!map[setHandle]) {
-        map[setHandle] = {
-          display: setConfig?.display,
-          fields: Array.isArray(setConfig?.fields) ? setConfig.fields : [],
-        };
-      }
-    });
-  });
-
-  return map;
-}
-
-function extractUrlFromAssetValue(value) {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-
-  if (typeof value.url === 'string' && value.url.trim()) {
-    return value.url.trim();
-  }
-
-  if (typeof value.permalink === 'string' && value.permalink.trim()) {
-    return value.permalink.trim();
-  }
-
-  if (typeof value.path === 'string' && value.path.trim()) {
-    const path = value.path.trim();
-    return path.startsWith('/') ? path : `/${path}`;
-  }
-
-  return null;
-}
-
-function findAssetUrlById(node, id) {
-  function walk(value, depth = 0) {
-    if (!value || depth > 7) {
-      return null;
-    }
-
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        const found = walk(item, depth + 1);
-        if (found) {
-          return found;
-        }
-      }
-
-      return null;
-    }
-
-    if (typeof value !== 'object') {
-      return null;
-    }
-
-    if (Object.prototype.hasOwnProperty.call(value, id)) {
-      const maybeUrl = extractUrlFromAssetValue(value[id]);
-      if (maybeUrl) {
-        return maybeUrl;
-      }
-    }
-
-    const maybeDirectUrl = extractUrlFromAssetValue(value);
-    if (maybeDirectUrl && (value.id === id || value._id === id || value.handle === id)) {
-      return maybeDirectUrl;
-    }
-
-    for (const nested of Object.values(value)) {
-      const found = walk(nested, depth + 1);
-      if (found) {
-        return found;
-      }
-    }
-
-    return null;
-  }
-
-  return walk(node);
-}
-
-function extractAssetUrls(value, context) {
-  if (!value) {
-    return [];
-  }
-
-  const items = Array.isArray(value) ? value : [value];
-  const urls = [];
-
-  for (const item of items) {
-    if (typeof item === 'string') {
-      if (item.startsWith('http://') || item.startsWith('https://') || item.startsWith('/')) {
-        urls.push(item);
-        continue;
-      }
-
-      const resolved = findAssetUrlById(context.publishMeta, item)
-        || findAssetUrlById(context.statamic?.$store?.state, item);
-
-      if (resolved) {
-        urls.push(resolved);
-      } else if (item.trim()) {
-        // Keep unresolved asset IDs visible so assigned assets are still represented.
-        urls.push(item.trim());
-      }
-
-      continue;
-    }
-
-    const url = extractUrlFromAssetValue(item);
-    if (url) {
-      urls.push(url);
-    }
-  }
-
-  return [...new Set(urls)];
-}
-
-function findPreviewBySetId(meta, setId) {
-  function walk(node) {
-    if (!node || typeof node !== 'object') {
-      return null;
-    }
-
-    if (Array.isArray(node)) {
-      for (const item of node) {
-        const found = walk(item);
-        if (found) {
-          return found;
-        }
-      }
-
-      return null;
-    }
-
-    if (node.previews && typeof node.previews === 'object' && node.previews[setId]) {
-      return node.previews[setId];
-    }
-
-    for (const value of Object.values(node)) {
-      const found = walk(value);
-      if (found) {
-        return found;
-      }
-    }
-
-    return null;
-  }
-
-  return walk(meta);
-}
-
-function findEntryPreviewById(meta, entryId) {
-  function walk(node, depth = 0) {
-    if (!node || depth > 8) {
-      return null;
-    }
-
-    if (Array.isArray(node)) {
-      for (const item of node) {
-        const found = walk(item, depth + 1);
-        if (found) {
-          return found;
-        }
-      }
-
-      return null;
-    }
-
-    if (typeof node !== 'object') {
-      return null;
-    }
-
-    if (Object.prototype.hasOwnProperty.call(node, entryId)) {
-      return node[entryId];
-    }
-
-    for (const value of Object.values(node)) {
-      const found = walk(value, depth + 1);
-      if (found) {
-        return found;
-      }
-    }
-
-    return null;
-  }
-
-  return walk(meta);
-}
-
-function normalizePreviewValue(value) {
-  if (['null', '[]', '{}', ''].includes(JSON.stringify(value))) {
-    return null;
-  }
-
-  if (typeof value === 'string') {
-    return value;
-  }
-
-  if (Array.isArray(value) && typeof value[0] === 'string') {
-    return value.join(', ');
-  }
-
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return String(value);
-  }
-
-  return JSON.stringify(value);
-}
-
-function normalizeScalarValue(value) {
-  if (value === null || value === undefined) {
-    return null;
-  }
-
-  if (typeof value === 'string') {
-    const normalized = value.trim();
-    return normalized ? normalized : null;
-  }
-
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return value;
-  }
-
-  return null;
-}
-
-function toPlainText(value) {
-  if (value === null || value === undefined) {
-    return null;
-  }
-
+function plainOneLiner(value) {
+  if (value === null || value === undefined) return null;
   const text = String(value)
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/["'`´“”„«»]/g, '')
+    .replace(/<[^>]*>/g, '')
     .replace(/\r?\n|\r/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-
   return text || null;
 }
 
-function getOptionLabel(option, raw) {
-  if (!option) {
+function resolveOptionLabel(key, options) {
+  if (key === null || key === undefined || key === '') return null;
+  const candidate = String(key);
+
+  if (Array.isArray(options)) {
+    for (const opt of options) {
+      if (!opt || typeof opt !== 'object') continue;
+      const optKey = String(opt.key ?? opt.value ?? opt.handle ?? opt.id ?? '');
+      if (optKey === candidate) {
+        return String(opt.value ?? opt.label ?? opt.key ?? candidate);
+      }
+    }
+  } else if (options && typeof options === 'object') {
+    if (Object.prototype.hasOwnProperty.call(options, candidate)) {
+      return String(options[candidate]) || candidate;
+    }
+  }
+
+  return candidate;
+}
+
+function resolveOptionValue(rawValue, options) {
+  if (rawValue === null || rawValue === undefined || rawValue === '') return null;
+
+  if (Array.isArray(rawValue)) {
+    const labels = rawValue.map((v) => resolveOptionLabel(v, options)).filter(Boolean);
+    return labels.length > 0 ? labels.join(', ') : null;
+  }
+
+  return resolveOptionLabel(rawValue, options);
+}
+
+function assetBriefValue(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'string') {
+    const parts = raw.split('/');
+    return parts[parts.length - 1] || raw;
+  }
+  if (typeof raw === 'object') {
+    const path = raw.url || raw.path || raw.id;
+    if (typeof path === 'string') {
+      const parts = path.split('/');
+      return parts[parts.length - 1] || path;
+    }
+  }
+  return null;
+}
+
+function pmNodesToText(nodes) {
+  if (!Array.isArray(nodes)) return '';
+  return nodes.map((node) => {
+    if (!node || typeof node !== 'object') return '';
+    if (node.type === 'text') return node.text || '';
+    if (node.type === 'hardBreak') return ' ';
+    if (Array.isArray(node.content)) return pmNodesToText(node.content);
+    return '';
+  }).join('').replace(/\s+/g, ' ').trim();
+}
+
+function briefBard(nodes, setConfigs) {
+  if (!Array.isArray(nodes) || nodes.length === 0) return null;
+
+  const segments = [];
+  const textBuffer = [];
+
+  function flushText() {
+    const text = textBuffer.splice(0).join(' ').replace(/\s+/g, ' ').trim();
+    if (text) segments.push({ type: 'text', value: text });
+  }
+
+  for (const node of nodes) {
+    if (node.type === 'set') {
+      flushText();
+      const setValues = node.attrs?.values ?? {};
+      const setType = setValues.type;
+      const setConfig = setType ? setConfigs[setType] : null;
+
+      const segment = { type: 'set', set_type: setType };
+      const display = cleanDisplay(setConfig?.display);
+      if (display) segment.display = display;
+
+      const fields = briefFieldsFromConfig(setValues, setConfig?.fields ?? [], setConfigs);
+      if (Object.keys(fields).length > 0) segment.fields = fields;
+
+      segments.push(segment);
+    } else {
+      const text = pmNodesToText([node]);
+      if (text) textBuffer.push(text);
+    }
+  }
+
+  flushText();
+
+  return segments.length > 0 ? segments : null;
+}
+
+const SKIP_TYPES = new Set(['spacer', 'revealer', 'section', 'code', 'width', 'icon', 'html']);
+const TEXT_TYPES = new Set(['text', 'textarea', 'markdown', 'yaml', 'slug', 'hidden']);
+const OPTION_TYPES = new Set(['select', 'radio', 'button_group', 'dictionary']);
+
+function briefSingleField(handle, rawValue, fieldConfig, setConfigs) {
+  if (rawValue === null || rawValue === undefined || rawValue === '' || rawValue === false) return null;
+
+  const type = fieldConfig?.type ?? '';
+
+  if (SKIP_TYPES.has(type)) return null;
+
+  if (['integer', 'float'].includes(type)) {
+    return typeof rawValue === 'number' && rawValue !== 0 ? rawValue : null;
+  }
+
+  if (TEXT_TYPES.has(type)) {
+    return plainOneLiner(rawValue);
+  }
+
+  // video field stores a YouTube/external URL as a string
+  if (type === 'video') {
+    return typeof rawValue === 'string' ? rawValue : null;
+  }
+
+  if (type === 'bard') {
+    return briefBard(Array.isArray(rawValue) ? rawValue : [], setConfigs);
+  }
+
+  // Detect unlabeled content arrays (bard or replicator without explicit type declaration)
+  if (type === '' && Array.isArray(rawValue) && rawValue.length > 0) {
+    const first = rawValue[0];
+    if (first && typeof first === 'object') {
+      const PM_NODE_TYPES = new Set(['paragraph', 'heading', 'set', 'bulletList', 'orderedList', 'blockquote', 'hardBreak', 'horizontalRule', 'codeBlock', 'image']);
+      if (PM_NODE_TYPES.has(first.type)) {
+        return briefBard(rawValue, setConfigs);
+      }
+      if (typeof first.type === 'string' && (first._id !== undefined || first.id !== undefined)) {
+        const items = rawValue
+          .filter((item) => item && typeof item === 'object')
+          .map((item) => briefReplicatorItem(item, setConfigs))
+          .filter(Boolean);
+        return items.length > 0 ? items : null;
+      }
+    }
+  }
+
+  if (OPTION_TYPES.has(type)) {
+    return resolveOptionValue(rawValue, fieldConfig?.options);
+  }
+
+  if (type === 'range') {
+    return typeof rawValue === 'number' ? rawValue : null;
+  }
+
+  if (type === 'checkbox') {
+    if (Array.isArray(rawValue) && fieldConfig?.options) {
+      return resolveOptionValue(rawValue, fieldConfig.options);
+    }
+    return rawValue ? true : null;
+  }
+
+  if (type === 'toggle') {
+    return (rawValue === true || rawValue === 1) ? true : null;
+  }
+
+  if (type === 'color') {
+    return typeof rawValue === 'string' ? rawValue : null;
+  }
+
+  if (type === 'date') {
+    return typeof rawValue === 'string' ? rawValue : null;
+  }
+
+  if (type === 'link') {
+    if (typeof rawValue === 'string') return rawValue || null;
+    if (rawValue && typeof rawValue === 'object') {
+      return rawValue.url || rawValue.href || rawValue.value || null;
+    }
     return null;
   }
 
-  const candidate = String(raw);
-
-  if (typeof option === 'string') {
-    return option === candidate ? option : null;
+  if (type === 'assets') {
+    const arr = Array.isArray(rawValue) ? rawValue : [rawValue];
+    const files = arr.map(assetBriefValue).filter(Boolean);
+    return files.length > 0 ? files : null;
   }
 
-  if (option && typeof option === 'object') {
-    if (Object.prototype.hasOwnProperty.call(option, candidate)) {
-      return toPlainText(option[candidate]);
-    }
-
-    const optionKey = option.key ?? option.value ?? option.handle ?? option.id;
-    if (optionKey !== undefined && String(optionKey) === candidate) {
-      return toPlainText(option.value ?? option.label ?? option.title ?? optionKey);
-    }
+  if (type === 'entries') {
+    const arr = Array.isArray(rawValue) ? rawValue : [rawValue];
+    if (arr.length === 0) return null;
+    return arr.map((e) => {
+      if (!e) return null;
+      if (typeof e === 'string') return e;
+      return e.slug || e.id || e.handle || String(e);
+    }).filter(Boolean);
   }
+
+  if (type === 'terms') {
+    const arr = Array.isArray(rawValue) ? rawValue : [rawValue];
+    return arr.length > 0 ? arr.join(', ') : null;
+  }
+
+  if (type === 'replicator') {
+    if (!Array.isArray(rawValue) || rawValue.length === 0) return null;
+    const items = rawValue
+      .filter((item) => item && typeof item === 'object')
+      .map((item) => briefReplicatorItem(item, setConfigs))
+      .filter(Boolean);
+    return items.length > 0 ? items : null;
+  }
+
+  if (type === 'grid') {
+    if (!Array.isArray(rawValue) || rawValue.length === 0) return null;
+    const rowFields = fieldConfig?.fields ?? [];
+    const rows = rawValue
+      .filter((row) => row && typeof row === 'object')
+      .map((row) => briefFieldsFromConfig(row, rowFields, setConfigs))
+      .filter((row) => Object.keys(row).length > 0);
+    return rows.length > 0 ? rows : null;
+  }
+
+  if (type === 'group') {
+    if (!rawValue || typeof rawValue !== 'object') return null;
+    const grouped = briefFieldsFromConfig(rawValue, fieldConfig?.fields ?? [], setConfigs);
+    return Object.keys(grouped).length > 0 ? grouped : null;
+  }
+
+  // Scalar fallbacks
+  if (typeof rawValue === 'boolean') return rawValue || null;
+  if (typeof rawValue === 'number') return rawValue !== 0 ? rawValue : null;
+  if (typeof rawValue === 'string') return plainOneLiner(rawValue);
 
   return null;
 }
 
-function resolveOptionValue(rawValue, fieldConfig) {
-  if (
-    rawValue === null
-    || rawValue === undefined
-    || rawValue === ''
-    || (rawValue === false && !['toggle', 'checkbox'].includes(fieldConfig?.type))
-  ) {
-    return null;
-  }
-
-  const options = fieldConfig?.options;
-  const optionList = Array.isArray(options)
-    ? options
-    : (options && typeof options === 'object' ? [options] : []);
-
-  if (Array.isArray(rawValue)) {
-    const labels = rawValue
-      .map((item) => {
-        if (item === null || item === undefined || item === '' || item === false) {
-          return null;
-        }
-
-        const found = optionList
-          .map((option) => getOptionLabel(option, item))
-          .find(Boolean);
-
-        return found ?? toPlainText(item);
-      })
-      .filter(Boolean);
-
-    return labels.length > 0 ? labels.join(', ') : null;
-  }
-
-  const found = optionList
-    .map((option) => getOptionLabel(option, rawValue))
-    .find(Boolean);
-
-  return found ?? toPlainText(rawValue);
-}
-
-function makeFieldId(ownerId, handle) {
-  const owner = typeof ownerId === 'string' && ownerId.trim() ? ownerId.trim() : 'root';
-  return `${owner}.${handle}`;
-}
-
-function inferFieldType(rawValue) {
-  if (Array.isArray(rawValue)) {
-    return 'array';
-  }
-
-  if (rawValue && typeof rawValue === 'object') {
-    return 'object';
-  }
-
-  return typeof rawValue;
-}
-
-function buildFieldData(ownerId, handle, fieldConfig, rawValue, value) {
-  const fieldId = makeFieldId(ownerId, handle);
-  const fieldType = typeof fieldConfig?.type === 'string' && fieldConfig.type
-    ? fieldConfig.type
-    : inferFieldType(rawValue);
-
-  return {
-    id: fieldId,
-    type: fieldType,
-    value,
-  };
-}
-
-function flattenToPlainText(value, seen = new Set()) {
-  if (value === null || value === undefined || value === '' || value === false) {
-    return '';
-  }
-
-  if (typeof value === 'string' || typeof value === 'number') {
-    return toPlainText(value) ?? '';
-  }
-
-  if (typeof value === 'boolean') {
-    return value ? 'true' : '';
-  }
-
-  if (Array.isArray(value)) {
-    return value
-      .map((item) => flattenToPlainText(item, seen))
-      .filter(Boolean)
-      .join(' ')
-      .trim();
-  }
-
-  if (typeof value === 'object') {
-    if (Object.prototype.hasOwnProperty.call(value, 'id')
-      && Object.prototype.hasOwnProperty.call(value, 'value')) {
-      return flattenToPlainText(value.value, seen);
-    }
-
-    if (seen.has(value)) {
-      return '';
-    }
-
-    seen.add(value);
-
-    const text = Object.entries(value)
-      .filter(([key]) => !['_id', 'id', 'type', 'enabled', 'display', 'label'].includes(key))
-      .map(([, nested]) => flattenToPlainText(nested, seen))
-      .filter(Boolean)
-      .join(' ')
-      .trim();
-
-    seen.delete(value);
-    return text;
-  }
-
-  return '';
-}
-
-function buildSetPreviewText(previews, setConfig, showFieldPreviews = true) {
-  if (!previews || typeof previews !== 'object') {
-    return '';
-  }
-
-  const fieldConfigs = Array.isArray(setConfig?.fields) ? setConfig.fields : [];
-
-  return Object.entries(previews)
-    .filter(([handle]) => handle !== '_')
-    .filter(([handle]) => {
-      const config = fieldConfigs.find((field) => field?.handle === handle) ?? {};
-
-      return config.replicator_preview === undefined
-        ? showFieldPreviews
-        : config.replicator_preview;
-    })
-    .map(([, value]) => normalizePreviewValue(value))
-    .filter(Boolean)
-    .join(' / ');
-}
-
-function buildButtonItemBrief(item, context) {
-  if (!item || typeof item !== 'object') {
-    return '';
-  }
-
-  const buttonType = item.type;
-  const buttonConfig = context.setConfigs[buttonType] ?? null;
-  const label = buttonConfig?.display || humanizeHandle(buttonType);
-
-  if (buttonType === 'button_custom' && typeof item.title === 'string' && item.title.trim()) {
-    return `${label} ${item.title.trim()}`;
-  }
-
-  return label;
-}
-
-function buildButtonItemData(item, context) {
-  if (!item || typeof item !== 'object') {
-    return null;
-  }
-
-  const type = item.type;
-  const buttonConfig = context.setConfigs[type] ?? null;
-  const label = buttonConfig?.display || humanizeHandle(type);
-
-  return {
-    type,
-    label,
-    title: typeof item.title === 'string' && item.title.trim() ? item.title.trim() : null,
-    link: typeof item.link === 'string' && item.link.trim() ? item.link.trim() : null,
-    url: typeof item.url === 'string' && item.url.trim() ? item.url.trim() : null,
-  };
-}
-
-function buildAccordionEntryBrief(entry, context) {
-  if (!entry || typeof entry !== 'object') {
-    return '';
-  }
-
-  const title = typeof entry.title === 'string' ? entry.title.trim() : '';
-  const text = extractProseMirrorText(entry.text, context);
-
-  return [title, text].filter(Boolean).join(' ');
-}
-
-function extractSetValueBrief(setType, values, context, setId) {
-  if (!values || typeof values !== 'object') {
-    return '';
-  }
-
-  const setConfig = context.setConfigs[setType] ?? null;
-  const nested = buildFieldsBrief(values, setConfig?.fields, context, setId ? `set:${setId}` : `set:${setType}`);
-  return flattenToPlainText(nested);
-}
-
-function renderSetLabel(node, context) {
-  const setType = node?.attrs?.values?.type;
-  if (!setType) {
-    return '';
-  }
-
-  const setConfig = context.setConfigs[setType] ?? null;
-  const setDisplay = setConfig?.display || humanizeHandle(setType);
-  const setId = node?.attrs?.id;
-  const previews = setId ? findPreviewBySetId(context.publishMeta, setId) : null;
-  const previewText = setType === 'accordion' ? '' : buildSetPreviewText(previews, setConfig, context.showFieldPreviews);
-  const valueBrief = extractSetValueBrief(setType, node?.attrs?.values, context, setId);
-
-  return [setDisplay, previewText, valueBrief].filter(Boolean).join(' ');
-}
-
-function extractProseMirrorText(nodes, context) {
-  if (!Array.isArray(nodes)) {
-    return '';
-  }
-
-  return nodes
-    .map((node) => {
-      if (node.type === 'text') {
-        return node.text ?? '';
-      }
-
-      if (node.type === 'set') {
-        return renderSetLabel(node, context);
-      }
-
-      const childText = extractProseMirrorText(node.content, context);
-
-      if (node.type === 'listItem') {
-        return `- ${childText}`;
-      }
-
-      return childText;
-    })
-    .filter(Boolean)
-    .join(' ')
-    .replace(/\s+([.,:;!?])/g, '$1')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function buildTileBrief(tile, context) {
-  if (!tile || typeof tile !== 'object') {
-    return null;
-  }
-
-  const brief = { type: tile.type, _id: tile._id };
-  const tileConfig = tile.type ? context.setConfigs[tile.type] : null;
-  const tileId = tile._id ?? tile.id ?? `tile:${tile.type ?? 'set'}`;
-  const tileFields = buildFieldsBrief(tile, tileConfig?.fields, context, String(tileId));
-  const tileText = toPlainText(flattenToPlainText(tileFields));
-  const tileFallbackText = toPlainText(extractFallbackObjectText(tile, context));
-
-  if (Object.keys(tileFields).length > 0) {
-    brief.fields = tileFields;
-  }
-
-  // Keep tile output non-duplicated: if fields exist, do not emit a second text summary.
-  if (Object.keys(tileFields).length === 0) {
-    if (tileText) {
-      brief.text = tileText;
-    } else if (tileFallbackText) {
-      brief.text = tileFallbackText;
-    } else if (Array.isArray(tile.text) && tile.text.length > 0) {
-      brief.text = toPlainText(extractProseMirrorText(tile.text, context));
-    }
-  }
-
-  return brief;
-}
-
-function extractFallbackObjectText(value, context) {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-
-  if (Array.isArray(value)) {
-    const parts = value
-      .map((item) => {
-        if (typeof item === 'string') {
-          return item.trim();
-        }
-
-        if (Array.isArray(item)) {
-          return extractProseMirrorText(item, context);
-        }
-
-        if (item && typeof item === 'object') {
-          return extractFallbackObjectText(item, context);
-        }
-
-        return null;
-      })
-      .filter(Boolean);
-
-    return parts.length > 0 ? parts.join(' ') : null;
-  }
-
-  const parts = [];
-
-  Object.entries(value).forEach(([key, nested]) => {
-    if (['_id', 'id', 'type', 'enabled'].includes(key)) {
-      return;
-    }
-
-    if (Array.isArray(nested)) {
-      if (nested.length > 0 && nested[0] && typeof nested[0] === 'object' && nested[0].type === 'paragraph') {
-        const text = extractProseMirrorText(nested, context);
-        if (text) {
-          parts.push(text);
-        }
-        return;
-      }
-
-      const urls = extractAssetUrls(nested, context);
-      if (urls.length > 0) {
-        parts.push(urls.join(' '));
-        return;
-      }
-
-      const nestedText = extractFallbackObjectText(nested, context);
-      if (nestedText) {
-        parts.push(nestedText);
-      }
-
-      return;
-    }
-
-    if (nested && typeof nested === 'object') {
-      const nestedText = extractFallbackObjectText(nested, context);
-      if (nestedText) {
-        parts.push(nestedText);
-      }
-      return;
-    }
-
-    if (/(title|headline|text|content|author|name|url|link)/i.test(key)) {
-      const scalar = normalizeScalarValue(nested);
-      if (scalar !== null) {
-        parts.push(String(scalar));
-      }
-    }
-  });
-
-  return parts.length > 0 ? parts.join(' ') : null;
-}
-
-function extractTableText(value) {
-  if (!value) {
-    return null;
-  }
-
-  const lines = [];
-
-  const consumeRow = (row) => {
-    if (Array.isArray(row)) {
-      const line = row
-        .map((cell) => (cell === null || cell === undefined ? '' : String(cell).trim()))
-        .filter(Boolean)
-        .join(' | ');
-
-      if (line) {
-        lines.push(line);
-      }
-      return;
-    }
-
-    if (row && typeof row === 'object') {
-      const line = Object.values(row)
-        .map((cell) => (cell === null || cell === undefined ? '' : String(cell).trim()))
-        .filter(Boolean)
-        .join(' | ');
-
-      if (line) {
-        lines.push(line);
-      }
-    }
-  };
-
-  if (Array.isArray(value)) {
-    value.forEach(consumeRow);
-  } else if (typeof value === 'object') {
-    const rows = Array.isArray(value.rows)
-      ? value.rows
-      : (Array.isArray(value.data) ? value.data : []);
-    rows.forEach(consumeRow);
-  }
-
-  return lines.length > 0 ? lines.join('\n') : null;
-}
-
-function extractFieldValue(handle, rawValue, fieldConfig, context, ownerId = 'root') {
-  const fieldType = typeof fieldConfig?.type === 'string' ? fieldConfig.type : '';
-  const fieldDisplay = fieldConfig?.display ?? humanizeHandle(handle);
-  const fieldId = makeFieldId(ownerId, handle);
-
-  if (rawValue === null || rawValue === undefined || rawValue === '' || rawValue === false) {
-    return null;
-  }
-
-  // Skip these field types entirely (except code which gets a note)
-  if (['code', 'revealer', 'width', 'icon', 'float', 'integer', 'collections', 'navs', 'structures', 'taxonomies', 'taxonomy_terms', 'user_groups', 'user_roles', 'users', 'array', 'sites', 'form'].includes(fieldType)) {
-    return null;
-  }
-
-  // Text-like fields -> plain single-line text.
-  if (fieldType === 'bard' || (Array.isArray(rawValue) && rawValue[0]?.type === 'paragraph')) {
-    return toPlainText(extractProseMirrorText(rawValue, context));
-  }
-
-  // Markdown -> strip to plain text
-  if (fieldType === 'markdown' && typeof rawValue === 'string') {
-    return toPlainText(rawValue.replace(/[#*_`\[\]()]/g, ' '));
-  }
-
-  // Text -> plain text
-  if (fieldType === 'text' && typeof rawValue === 'string') {
-    return toPlainText(rawValue);
-  }
-
-  // Textarea -> plain text
-  if (fieldType === 'textarea' && typeof rawValue === 'string') {
-    return toPlainText(rawValue);
-  }
-
-  // Table -> sequential plain text
-  if (fieldType === 'table') {
-    return toPlainText(extractTableText(rawValue));
-  }
-
-  // Color → as plain text
-  if (fieldType === 'color' && typeof rawValue === 'string') {
-    return toPlainText(rawValue);
-  }
-
-  // Date → as plain text
-  if (fieldType === 'date' && typeof rawValue === 'string') {
-    return toPlainText(rawValue);
-  }
-
-  // Hidden → print value or default
-  if (fieldType === 'hidden') {
-    const value = rawValue ?? fieldConfig?.default;
-    return toPlainText(value);
-  }
-
-  // HTML → if not script/style, plain text
-  if (fieldType === 'html' && typeof rawValue === 'string') {
-    const isScript = /^<\s*(script|style)\b/i.test(rawValue);
-    if (isScript) {
-      return null;
-    }
-
-    return toPlainText(rawValue);
-  }
-
-  // YAML → plain text
-  if (fieldType === 'yaml' && typeof rawValue === 'string') {
-    return toPlainText(rawValue);
-  }
-
-  // Video → URL/value text
-  if (fieldType === 'video' && typeof rawValue === 'string') {
-    return toPlainText(rawValue);
-  }
-
-  // Link -> include available text/url parts.
-  if (fieldType === 'link') {
-    if (typeof rawValue === 'string') {
-      return toPlainText(rawValue);
-    }
-
-    if (rawValue && typeof rawValue === 'object') {
-      const parts = [
-        rawValue.title,
-        rawValue.text,
-        rawValue.url,
-        rawValue.href,
-        rawValue.value,
-      ]
-        .filter((part) => typeof part === 'string' && part.trim())
-        .map((part) => part.trim());
-
-      return parts.length > 0 ? toPlainText([...new Set(parts)].join(' ')) : null;
-    }
-  }
-
-  // Option-like fields -> selected option content.
-  if (['select', 'radio', 'button_group', 'dictionary', 'range'].includes(fieldType)) {
-    return resolveOptionValue(rawValue, fieldConfig);
-  }
-
-  // Checkbox/Toggle -> print value label when enabled/selected.
-  if (fieldType === 'toggle') {
-    return {
-      label: fieldDisplay,
-      value: Boolean(rawValue),
-    };
-  }
-
-  if (fieldType === 'checkbox') {
-    if (Array.isArray(rawValue)) {
-      return resolveOptionValue(rawValue, fieldConfig);
-    }
-
-    return {
-      label: fieldDisplay,
-      value: Boolean(rawValue),
-    };
-  }
-
-  // Assets -> keep resolved values.
-  if (fieldType === 'assets' || handle === 'medium') {
-    const urls = extractAssetUrls(rawValue, context);
-    return urls.length > 0 ? toPlainText(urls.join(' ')) : null;
-  }
-
-  if (fieldType === 'replicator' && Array.isArray(rawValue)) {
-    const replicatorSetConfigs = getReplicatorSetConfigs(fieldConfig);
-    return rawValue
-      .map((item, index) => {
-        if (!item || typeof item !== 'object') {
-          return null;
-        }
-
-        const setType = item.type;
-        const setConfig = setType ? replicatorSetConfigs[setType] : null;
-        const itemId = item._id ?? item.id ?? `${fieldId}[${index}]`;
-
-        return {
-          id: String(itemId),
-          type: setType ?? null,
-          display: setConfig?.display ?? null,
-          fields: buildFieldsBrief(item, setConfig?.fields, context, String(itemId)),
-        };
-      })
-      .filter(Boolean);
-  }
-
-  if (fieldType === 'group' && rawValue && typeof rawValue === 'object') {
-    return buildFieldsBrief(rawValue, fieldConfig?.fields, context, fieldId);
-  }
-
-  if (fieldType === 'grid' && Array.isArray(rawValue)) {
-    return rawValue
-      .map((row, index) => {
-        if (!row || typeof row !== 'object') {
-          return null;
-        }
-
-        const rowId = row._id ?? row.id ?? `${fieldId}[${index}]`;
-        return {
-          id: String(rowId),
-          fields: buildFieldsBrief(row, fieldConfig?.fields, context, String(rowId)),
-        };
-      })
-      .filter(Boolean);
-  }
-
-  if (Array.isArray(rawValue)) {
-    const assets = extractAssetUrls(rawValue, context);
-    if (assets.length > 0) {
-      return toPlainText(assets.join(' '));
-    }
-
-    return toPlainText(flattenToPlainText(rawValue));
-  }
-
-  if (rawValue && typeof rawValue === 'object') {
-    const nested = buildFieldsBrief(rawValue, fieldConfig?.fields, context, fieldId);
-    if (Object.keys(nested).length > 0) {
-      return nested;
-    }
-
-    return toPlainText(extractFallbackObjectText(rawValue, context));
-  }
-
-  return toPlainText(normalizeScalarValue(rawValue));
-}
-
-function buildFieldsBrief(values, fieldEntries, context, ownerId = 'root') {
-  if (!values || typeof values !== 'object') {
-    return {};
-  }
-
+function briefFieldsFromConfig(values, fieldEntries, setConfigs) {
   const result = {};
+  if (!values || typeof values !== 'object') return result;
 
   if (Array.isArray(fieldEntries) && fieldEntries.length > 0) {
-    fieldEntries.forEach((fieldEntry) => {
-      const handle = fieldEntry?.handle;
-      if (!handle) {
-        return;
-      }
+    for (const entry of fieldEntries) {
+      const handle = entry?.handle;
+      if (!handle) continue;
 
-      const fieldConfig = fieldEntry?.field && typeof fieldEntry.field === 'object'
-        ? { ...fieldEntry.field, ...(fieldEntry?.config ?? {}) }
-        : { ...(fieldEntry?.config ?? {}) };
+      const fieldConfig = (entry?.field && typeof entry.field === 'object')
+        ? { ...entry.field, ...(entry.config ?? {}) }
+        : { ...(entry.config ?? {}) };
 
       const rawValue = values[handle];
-      const value = extractFieldValue(handle, rawValue, fieldConfig, context, ownerId);
-      if (value !== null) {
-        result[handle] = buildFieldData(ownerId, handle, fieldConfig, rawValue, value);
+      const brief = briefSingleField(handle, rawValue, fieldConfig, setConfigs);
+      if (brief !== null && brief !== undefined) {
+        result[handle] = brief;
       }
-    });
-  }
-
-  if (Object.keys(result).length === 0) {
-    Object.entries(values).forEach(([handle, value]) => {
-      if (['_id', 'id', 'type', 'enabled'].includes(handle)) {
-        return;
+    }
+  } else {
+    // Fallback: heuristic walk when no field config is available
+    for (const [handle, rawValue] of Object.entries(values)) {
+      if (['_id', 'id', 'type', 'enabled', 'key'].includes(handle)) continue;
+      const brief = briefSingleField(handle, rawValue, {}, setConfigs);
+      if (brief !== null && brief !== undefined) {
+        result[handle] = brief;
       }
-
-      const extracted = extractFieldValue(handle, value, {}, context, ownerId);
-      if (extracted !== null) {
-        result[handle] = buildFieldData(ownerId, handle, {}, value, extracted);
-      }
-    });
+    }
   }
 
   return result;
 }
 
-function buildItemBrief(item, context, configMap = null) {
-  if (!item || typeof item !== 'object') {
-    return null;
+function briefReplicatorItem(item, setConfigs) {
+  if (!item || typeof item !== 'object') return null;
+
+  const setType = item.type;
+  const setConfig = setType ? setConfigs[setType] : null;
+  const display = cleanDisplay(setConfig?.display);
+
+  const fields = briefFieldsFromConfig(item, setConfig?.fields ?? [], setConfigs);
+
+  // Spread fields first so metadata keys always win over any same-named field handles
+  const result = { ...fields, type: setType };
+  const id = item._id ?? item.id;
+  if (id) result._id = id;
+  if (display) result.display = display;
+  if (item.enabled === false) result.enabled = false;
+
+  return result;
+}
+
+function collectBriefSetConfigs(node, map) {
+  if (!node || typeof node !== 'object') return;
+
+  if (Array.isArray(node)) {
+    node.forEach((item) => collectBriefSetConfigs(item, map));
+    return;
   }
 
-  const itemType = item.type;
-  const itemConfig = (configMap && itemType ? configMap[itemType] : null)
-    ?? (itemType ? context.setConfigs[itemType] : null)
-    ?? null;
-
-  const brief = {
-    type: itemType,
-    _id: item._id,
-  };
-
-  if (itemConfig?.display) {
-    brief.display = itemConfig.display;
+  // Case 1: node carries handle as an explicit property (e.g. resolved blueprint field entries)
+  if (
+    typeof node.handle === 'string' &&
+    Array.isArray(node.fields) &&
+    Object.prototype.hasOwnProperty.call(node, 'display') &&
+    !map[node.handle]
+  ) {
+    map[node.handle] = { display: node.display, fields: node.fields };
   }
 
-  const fieldConfigs = Array.isArray(itemConfig?.fields) ? itemConfig.fields : [];
-  const extractedFields = {};
-  const itemId = item._id ?? item.id ?? `item:${itemType ?? 'set'}`;
+  for (const [key, value] of Object.entries(node)) {
+    if (!value || typeof value !== 'object') continue;
 
-  if (Array.isArray(item.tiles) && !brief.tiles) {
-    brief.tiles = item.tiles.map((tile) => buildTileBrief(tile, context));
+    // Case 2: Statamic stores sets as key-value maps where the key IS the handle.
+    // Identify set-config objects by having a string display and a fields array but no handle property.
+    if (
+      !Array.isArray(value) &&
+      typeof value.display === 'string' &&
+      Array.isArray(value.fields) &&
+      typeof value.handle === 'undefined' &&
+      !map[key]
+    ) {
+      map[key] = { display: value.display, fields: value.fields };
+    }
+
+    collectBriefSetConfigs(value, map);
   }
+}
 
-  if (item.type === 'medium') {
-    const mediumUrls = item.medium && Array.isArray(item.medium)
-      ? extractAssetUrls(item.medium, context)
-      : [];
+function getBriefSetConfigs(blueprint) {
+  const map = {};
+  collectBriefSetConfigs(blueprint, map);
+  return map;
+}
 
-    if (mediumUrls.length > 0) {
-      brief.medium_url = mediumUrls[0];
-      if (mediumUrls.length > 1) {
-        brief.medium_urls = mediumUrls;
-      }
+function getMainTabFields(blueprint) {
+  if (!blueprint || typeof blueprint !== 'object') return [];
+
+  const tabs = blueprint.tabs;
+  if (!tabs || typeof tabs !== 'object') return [];
+
+  // Prefer tab named 'main', else use the first tab
+  const tab = tabs.main ?? Object.values(tabs)[0];
+  if (!tab) return [];
+
+  const fields = [];
+  for (const section of (Array.isArray(tab.sections) ? tab.sections : [])) {
+    for (const field of (Array.isArray(section.fields) ? section.fields : [])) {
+      if (field?.handle) fields.push(field);
     }
   }
 
-  for (const fieldEntry of fieldConfigs) {
-    const handle = fieldEntry?.handle;
-    if (!handle) {
-      continue;
-    }
+  return fields;
+}
 
-    // For tile containers, the raw `fields.tiles` string duplicates `item.tiles` content.
-    if (handle === 'tiles' && Array.isArray(item.tiles)) {
-      continue;
-    }
+export function buildSectionBrief(section, options = {}) {
+  if (!section || typeof section !== 'object') return null;
+  const s = options.statamic ?? window.Statamic;
+  const publishStore = getPublishStore(s);
+  const setConfigs = getBriefSetConfigs(publishStore?.blueprint);
+  return briefReplicatorItem(section, setConfigs);
+}
 
-    const fieldConfig = fieldEntry?.field && typeof fieldEntry.field === 'object'
-      ? { ...fieldEntry.field, ...(fieldEntry?.config ?? {}) }
-      : { ...(fieldEntry?.config ?? {}) };
-    const rawValue = item[handle];
-    const value = extractFieldValue(handle, rawValue, fieldConfig, context, String(itemId));
+export function buildPageBrief(values, options = {}) {
+  const s = options.statamic ?? window.Statamic;
+  const publishStore = getPublishStore(s);
+  const blueprint = publishStore?.blueprint;
+  const setConfigs = getBriefSetConfigs(blueprint);
+  const mainFields = getMainTabFields(blueprint);
 
-    if (value === null) {
-      continue;
-    }
+  const sourceValues = values ?? publishStore?.values ?? {};
+  if (!sourceValues || typeof sourceValues !== 'object') return null;
 
-    extractedFields[handle] = buildFieldData(String(itemId), handle, fieldConfig, rawValue, value);
+  // Build a field-config lookup from blueprint for type-aware processing
+  const fieldConfigByHandle = {};
+  for (const entry of mainFields) {
+    const h = entry?.handle;
+    if (!h) continue;
+    fieldConfigByHandle[h] = (entry?.field && typeof entry.field === 'object')
+      ? { ...entry.field, ...(entry.config ?? {}) }
+      : { ...(entry.config ?? {}) };
   }
 
-  if (Object.keys(extractedFields).length > 0) {
-    brief.fields = extractedFields;
-  }
+  // Blueprint fields first, then guarantee core content handles are always included
+  const CORE_HANDLES = ['title', 'header', 'sections'];
+  const seen = new Set();
+  const handlesToProcess = [
+    ...mainFields.map((e) => e?.handle).filter(Boolean),
+    ...CORE_HANDLES.filter((h) => sourceValues[h] !== undefined),
+  ].filter((h) => {
+    if (seen.has(h)) return false;
+    seen.add(h);
+    return true;
+  });
 
-  const textFromFields = toPlainText(flattenToPlainText(extractedFields));
+  const brief = {};
 
-  // Avoid duplicate output: when structured fields exist, do not add a second text summary.
-  if (Object.keys(extractedFields).length === 0) {
-    if (textFromFields) {
-      brief.text = textFromFields;
-    } else {
-      const fallbackText = toPlainText(extractFallbackObjectText(item, context));
-      if (fallbackText) {
-        brief.text = fallbackText;
-      }
+  for (const handle of handlesToProcess) {
+    const rawValue = sourceValues[handle];
+    if (rawValue === undefined) continue;
+    const fieldConfig = fieldConfigByHandle[handle] ?? {};
+    const value = briefSingleField(handle, rawValue, fieldConfig, setConfigs);
+    if (value !== null && value !== undefined) {
+      brief[handle] = value;
     }
   }
 
   return brief;
-}
-
-export function buildSectionBrief(section, options = {}) {
-  if (!section || typeof section !== 'object') {
-    return null;
-  }
-
-  const context = {
-    statamic: options.statamic ?? window.Statamic,
-    publishMeta: options.publishMeta ?? getPublishStore(options.statamic)?.meta ?? null,
-    setConfigs: options.setConfigs ?? getSetConfigs(options.statamic),
-    showFieldPreviews: options.showFieldPreviews ?? true,
-  };
-
-  return buildItemBrief(section, context);
-}
-
-export function buildPageBrief(values, options = {}) {
-  const sourceValues = values ?? getPublishStore(options.statamic)?.values ?? null;
-  if (!sourceValues || typeof sourceValues !== 'object') {
-    return null;
-  }
-
-  const context = {
-    statamic: options.statamic ?? window.Statamic,
-    publishMeta: options.publishMeta ?? getPublishStore(options.statamic)?.meta ?? null,
-    setConfigs: options.setConfigs ?? getSetConfigs(options.statamic),
-    showFieldPreviews: options.showFieldPreviews ?? true,
-  };
-
-  const headerItems = Array.isArray(sourceValues.header) ? sourceValues.header : [];
-  const sections = Array.isArray(sourceValues.sections) ? sourceValues.sections : [];
-
-  return {
-    title: typeof sourceValues.title === 'string' ? sourceValues.title : null,
-    header: headerItems.map((item, index) => ({
-      index,
-      ...buildItemBrief(item, context),
-    })),
-    sectionCount: sections.length,
-    sections: sections.map((section, index) => ({
-      index,
-      ...buildItemBrief(section, context),
-    })),
-  };
 }
 
 export function cloneThirdSectionAfterwards(statamic) {
