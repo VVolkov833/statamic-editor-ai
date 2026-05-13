@@ -1,4 +1,3 @@
-const BUTTON_GROUP_ID = 'section-tools-live-preview-buttons';
 const PANEL_ID = 'section-tools-floating-panel';
 const PANEL_HANDLE_ID = 'section-tools-floating-panel-handle';
 const PANEL_MARGIN = 16;
@@ -23,18 +22,6 @@ function appendDefaultActionButtons(container, actions) {
   container.appendChild(createButton('Log §2 Blueprint', actions.onLogSection2Blueprint));
   container.appendChild(createButton('Log Page Brief', actions.onLogPageBrief));
   container.appendChild(createButton('Search Assets', actions.onSearchAssets));
-}
-
-function createButtonGroup(actions) {
-  const wrapper = document.createElement('div');
-
-  wrapper.id = BUTTON_GROUP_ID;
-  wrapper.style.display = 'flex';
-  wrapper.style.gap = '0.5rem';
-
-  appendDefaultActionButtons(wrapper, actions);
-
-  return wrapper;
 }
 
 function createPanelGroup(actions) {
@@ -198,53 +185,9 @@ function unmountFloatingPanelWhenOutOfScope(isInScope) {
   }
 }
 
-function mountButtons(isInScope, actions) {
-  if (!isInScope()) {
-    return;
-  }
-
-  if (document.getElementById(BUTTON_GROUP_ID)) {
-    return;
-  }
-
-  const livePreviewHeader = document.querySelector('.live-preview-header');
-  if (!livePreviewHeader) {
-    return;
-  }
-
-  const group = createButtonGroup(actions);
-  const controls = livePreviewHeader.querySelector('.flex.items-center');
-  const closeButton = controls?.querySelector('.btn-close');
-
-  if (controls && closeButton) {
-    controls.insertBefore(group, closeButton);
-    return;
-  }
-
-  if (controls) {
-    controls.appendChild(group);
-    return;
-  }
-
-  livePreviewHeader.appendChild(group);
-}
-
-function unmountButtonsWhenOutOfScope(isInScope) {
-  if (isInScope()) {
-    return;
-  }
-
-  const group = document.getElementById(BUTTON_GROUP_ID);
-  if (group) {
-    group.remove();
-  }
-}
-
 export function syncSectionToolsUi(options) {
   const { isInScope, actions, panelStorageKey } = options;
 
-  mountButtons(isInScope, actions);
-  unmountButtonsWhenOutOfScope(isInScope);
   mountFloatingPanel(isInScope, actions, panelStorageKey);
   unmountFloatingPanelWhenOutOfScope(isInScope);
 }
