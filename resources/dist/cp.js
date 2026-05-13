@@ -443,10 +443,41 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
     logSectionBlueprintById(id);
   }
 
+  async function searchAssets(query) {
+    const cpRoot = window.Statamic?.$config?.get('cp_root') ?? '/cp';
+    const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') ?? '';
+
+    try {
+      const res = await fetch(
+        `${cpRoot}/section-tools/assets/search?query=${encodeURIComponent(query)}`,
+        {
+          headers: {
+            Accept: 'application/json',
+            'X-CSRF-TOKEN': token,
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+        },
+      );
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const results = await res.json();
+      console.log(`[SectionTools] Asset search ("${query}"):`, JSON.stringify(results, null, 2));
+    } catch (err) {
+      console.error('[SectionTools] Asset search error:', err);
+      window.Statamic.$toast.error('Asset-Suche fehlgeschlagen.');
+    }
+  }
+
+  function logAssetSearch() {
+    searchAssets('Oberschenkel');
+  }
+
   window.SectionTools = window.SectionTools ?? {};
   window.SectionTools.logSectionById = logSectionById;
   window.SectionTools.logBlueprintById = logSectionBlueprintById;
   window.SectionTools.logPageBrief = logPageBrief;
+  window.SectionTools.searchAssets = searchAssets;
 
   function syncButtons() {
     syncSectionToolsUi({
@@ -460,6 +491,7 @@ import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tool
         onLogSection2: logSection2,
         onLogSection2Blueprint: logSection2Blueprint,
         onLogPageBrief: logPageBrief,
+        onSearchAssets: logAssetSearch,
       },
     });
   }
