@@ -11,11 +11,15 @@ function patchItemInArray(arr, targetId, fields) {
     const item = arr[i];
     if (!item || typeof item !== 'object') continue;
     if (getItemId(item) === targetId) {
+      const type = item.type ?? null;
       arr[i] = { ...item, ...fields };
-      return true;
+      return type;
     }
     for (const fieldValue of Object.values(item)) {
-      if (Array.isArray(fieldValue) && patchItemInArray(fieldValue, targetId, fields)) return true;
+      if (Array.isArray(fieldValue)) {
+        const result = patchItemInArray(fieldValue, targetId, fields);
+        if (result !== false) return result;
+      }
     }
   }
   return false;
@@ -26,11 +30,15 @@ function removeItemFromArray(arr, targetId) {
     const item = arr[i];
     if (!item || typeof item !== 'object') continue;
     if (getItemId(item) === targetId) {
+      const type = item.type ?? null;
       arr.splice(i, 1);
-      return true;
+      return type;
     }
     for (const fieldValue of Object.values(item)) {
-      if (Array.isArray(fieldValue) && removeItemFromArray(fieldValue, targetId)) return true;
+      if (Array.isArray(fieldValue)) {
+        const result = removeItemFromArray(fieldValue, targetId);
+        if (result !== false) return result;
+      }
     }
   }
   return false;
@@ -79,6 +87,7 @@ let totalInputTokens = 0;
 let totalOutputTokens = 0;
 
 const MAX_ROUNDS = 8;
+const WRITE_TOOLS = new Set(['update_item', 'add_item', 'delete_item', 'move_item', 'update_field']);
 
 const AI_TOOLS = [
   {
@@ -218,10 +227,11 @@ async function executeTool(name, input) {
     for (const [rootHandle, rootValue] of Object.entries(values)) {
       if (!Array.isArray(rootValue)) continue;
       const cloned = cloneValue(rootValue);
-      if (patchItemInArray(cloned, input.id, input.fields)) {
+      const type = patchItemInArray(cloned, input.id, input.fields);
+      if (type !== false) {
         pushUndoSnapshot();
         commitField(window.Statamic, rootHandle, cloned);
-        return { ok: true };
+        return { ok: true, type };
       }
     }
     return { error: `Item "${input.id}" not found` };
@@ -260,10 +270,11 @@ async function executeTool(name, input) {
     for (const [rootHandle, rootValue] of Object.entries(values)) {
       if (!Array.isArray(rootValue)) continue;
       const cloned = cloneValue(rootValue);
-      if (removeItemFromArray(cloned, input.id)) {
+      const type = removeItemFromArray(cloned, input.id);
+      if (type !== false) {
         pushUndoSnapshot();
         commitField(window.Statamic, rootHandle, cloned);
-        return { ok: true };
+        return { ok: true, type };
       }
     }
     return { error: `Item "${input.id}" not found` };
@@ -288,7 +299,7 @@ async function executeTool(name, input) {
       }
       pushUndoSnapshot();
       commitField(window.Statamic, rootHandle, cloned);
-      return { ok: true };
+      return { ok: true, type: item.type ?? null };
     }
     return { error: `Item "${input.id}" not found` };
   }
@@ -397,12 +408,13 @@ function buildSystemPrompt(getBrief) {
   const brief = getBrief?.();
   const briefJson = brief ? JSON.stringify(brief, null, 2) : null;
 
-  const role = `You are an AI assistant helping a web editor manage page content in a Statamic CMS.
+  const staticText = `You are an AI assistant helping a web editor manage page content in a Statamic CMS.
 The site is for a plastic surgery clinic in Frankfurt, Germany.
 You help with content suggestions, copywriting, and page structure advice.
 Respond concisely.
 When referring to sections to the user, use 1-based numbering (e.g. "section 1", "section 2"). Tool calls always use _id values — never positional indexes.
-ITEM IDs: Every item in the brief (sections, tiles, accordion items, etc.) has a unique _id. Always use these in tool calls. Never guess or construct an _id.
+ITEM IDs: Every item in the brief (sections, tiles, accordion items, etc.) has a unique _id. Always use these in tool calls. Never guess or construct an _id — if you cannot find the exact _id in the brief, stop and ask the user to clarify instead of proceeding. Write tool responses include a "type" field confirming what was affected — verify it matches your intention before continuing.
+BRIEF: The brief is rebuilt after every write operation and always reflects current page state. Always read _ids from the current brief — never reuse _ids from earlier in this conversation, which may reference deleted or changed items.
 READING: The brief contains every item's _id, type, and key content. Do NOT call get_item before delete, move, or update_item — derive the _id from the brief. Only call get_item when you need full raw data not in the brief (e.g. complete ProseMirror nodes of a bard field you intend to edit).
 UPDATING: update_item patches any item at any depth by _id. To update a tile, accordion item, or any nested item, use its own _id directly — no need to reconstruct the parent array.
 ADDING: add_item takes parent + type. Use the root field handle as parent for top-level items (the top-level keys visible in the brief, e.g. "sections", "header"). For nested items (e.g. a tile inside a section) use the parent item's _id as parent and set field to the replicator field name (e.g. "tiles").
@@ -410,9 +422,15 @@ BARD FIELDS use ProseMirror JSON. Always call get_field (for scalar top-level fi
 ASSET FIELDS store values as "assets::path/to/file.jpg" strings (with the assets:: prefix). Always include this prefix when setting an asset field.
 When passing a complex object or array as a tool argument value, pass it as a native JSON value — never as a JSON string.`;
 
-  return briefJson
-    ? `${role}\n\nCurrent page brief:\n\`\`\`json\n${briefJson}\n\`\`\``
-    : role;
+  const blocks = [
+    { type: 'text', text: staticText, cache_control: { type: 'ephemeral' } },
+  ];
+
+  if (briefJson) {
+    blocks.push({ type: 'text', text: `Current page brief:\n\`\`\`json\n${briefJson}\n\`\`\`` });
+  }
+
+  return blocks;
 }
 
 export function createChatSection(getBrief) {
@@ -515,7 +533,7 @@ export function createChatSection(getBrief) {
     messages.push({ role: 'user', content: text });
     appendMessage(history, 'user', text);
 
-    const systemPrompt = buildSystemPrompt(getBrief);
+    let systemPrompt = buildSystemPrompt(getBrief);
     const msgCountBefore = messages.length;
 
     try {
@@ -582,6 +600,10 @@ export function createChatSection(getBrief) {
         }
 
         messages.push({ role: 'user', content: toolResults });
+
+        if (toolUseBlocks.some((b) => WRITE_TOOLS.has(b.name))) {
+          systemPrompt = buildSystemPrompt(getBrief);
+        }
       }
 
       if (finalText === null) finalText = '[max steps reached]';
