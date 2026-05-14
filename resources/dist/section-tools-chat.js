@@ -1,6 +1,78 @@
-import { getPublishStore, getSections, setSections, assignFreshSectionIdentity, uid, getPublishModulesWithSections } from './section-tools-lib.js';
+import { getPublishStore, getSections, setSections, assignFreshSectionIdentity, uid, getPublishModulesWithSections, cloneValue, commitField } from './section-tools-lib.js';
 import { simplifyBlueprintNode, fetchAssetsForAI } from './section-tools-queries.js';
 import { pushUndoSnapshot } from './section-tools-mutations.js';
+
+function getItemId(item) {
+  return item?._id ?? item?.id ?? item?.key ?? null;
+}
+
+function patchItemInArray(arr, targetId, fields) {
+  for (let i = 0; i < arr.length; i++) {
+    const item = arr[i];
+    if (!item || typeof item !== 'object') continue;
+    if (getItemId(item) === targetId) {
+      arr[i] = { ...item, ...fields };
+      return true;
+    }
+    for (const fieldValue of Object.values(item)) {
+      if (Array.isArray(fieldValue) && patchItemInArray(fieldValue, targetId, fields)) return true;
+    }
+  }
+  return false;
+}
+
+function removeItemFromArray(arr, targetId) {
+  for (let i = 0; i < arr.length; i++) {
+    const item = arr[i];
+    if (!item || typeof item !== 'object') continue;
+    if (getItemId(item) === targetId) {
+      arr.splice(i, 1);
+      return true;
+    }
+    for (const fieldValue of Object.values(item)) {
+      if (Array.isArray(fieldValue) && removeItemFromArray(fieldValue, targetId)) return true;
+    }
+  }
+  return false;
+}
+
+function findItemWithParent(arr, targetId) {
+  for (let i = 0; i < arr.length; i++) {
+    const item = arr[i];
+    if (!item || typeof item !== 'object') continue;
+    if (getItemId(item) === targetId) {
+      return { item, parentArray: arr, index: i };
+    }
+    for (const fieldValue of Object.values(item)) {
+      if (Array.isArray(fieldValue)) {
+        const found = findItemWithParent(fieldValue, targetId);
+        if (found) return found;
+      }
+    }
+  }
+  return null;
+}
+
+function insertAfterIdOrAppend(arr, newItem, afterId) {
+  if (!afterId) { arr.push(newItem); return; }
+  const idx = arr.findIndex((i) => getItemId(i) === afterId);
+  arr.splice(idx >= 0 ? idx + 1 : arr.length, 0, newItem);
+}
+
+function addToParentItem(arr, parentId, fieldHandle, newItem, afterId) {
+  for (const item of arr) {
+    if (!item || typeof item !== 'object') continue;
+    if (getItemId(item) === parentId) {
+      if (!Array.isArray(item[fieldHandle])) item[fieldHandle] = [];
+      insertAfterIdOrAppend(item[fieldHandle], newItem, afterId);
+      return true;
+    }
+    for (const fieldValue of Object.values(item)) {
+      if (Array.isArray(fieldValue) && addToParentItem(fieldValue, parentId, fieldHandle, newItem, afterId)) return true;
+    }
+  }
+  return false;
+}
 
 let messages = [];
 let totalInputTokens = 0;
@@ -11,29 +83,29 @@ const MAX_ROUNDS = 8;
 const AI_TOOLS = [
   {
     name: 'get_field',
-    description: 'Get the raw value of a top-level page field (e.g. header, title). Always call this before editing a bard or replicator field so you can see the exact structure to modify.',
+    description: 'Get the raw value of a top-level scalar page field (e.g. title). For sections, tiles, or any replicator item, use get_item instead.',
     input_schema: {
       type: 'object',
       properties: {
-        handle: { type: 'string', description: 'Field handle, e.g. "header" or "title"' },
+        handle: { type: 'string', description: 'Field handle, e.g. "title"' },
       },
       required: ['handle'],
     },
   },
   {
-    name: 'get_section',
-    description: 'Get the full raw content of one section by its 0-based index.',
+    name: 'get_item',
+    description: 'Get the full raw content of any item by its _id — works for sections, tiles, accordion items, or any nested replicator item. Use this before editing bard fields to see the exact ProseMirror structure.',
     input_schema: {
       type: 'object',
       properties: {
-        index: { type: 'integer', description: 'Zero-based section index' },
+        id: { type: 'string', description: 'The _id of the item' },
       },
-      required: ['index'],
+      required: ['id'],
     },
   },
   {
     name: 'get_blueprint',
-    description: 'Get the page blueprint — all available section types and their fields.',
+    description: 'Get the page blueprint — all available item types and their fields.',
     input_schema: { type: 'object', properties: {} },
   },
   {
@@ -48,60 +120,62 @@ const AI_TOOLS = [
     },
   },
   {
-    name: 'update_section',
-    description: 'Patch fields on an existing section. Only supplied fields change; others are preserved. Do not change _id.',
+    name: 'update_item',
+    description: 'Patch fields on any item by its _id — works for sections, tiles, or any nested replicator item at any depth. Only supplied fields change; others are preserved. Never change _id or type.',
     input_schema: {
       type: 'object',
       properties: {
-        index: { type: 'integer', description: 'Zero-based section index' },
-        fields: { type: 'object', description: 'Key-value pairs of fields to set on the section' },
+        id: { type: 'string', description: 'The _id of the item to update' },
+        fields: { type: 'object', description: 'Key-value pairs of fields to patch on the item' },
       },
-      required: ['index', 'fields'],
+      required: ['id', 'fields'],
     },
   },
   {
-    name: 'add_section',
-    description: 'Insert a new section. Supply fields to set content immediately and avoid a separate update_section call.',
+    name: 'add_item',
+    description: 'Add a new item to any replicator. "parent" is either a root field handle (e.g. "sections", "header") for top-level items, or the _id of a parent item for nested items. When parent is an _id, "field" is required — the replicator field name within that parent (e.g. "tiles").',
     input_schema: {
       type: 'object',
       properties: {
-        type: { type: 'string', description: 'Section type handle, e.g. "text" or "quote"' },
-        after_index: { type: 'integer', description: 'Insert after this 0-based index. Omit or use -1 to append.' },
-        fields: { type: 'object', description: 'Optional fields to set on the new section immediately.' },
+        parent: { type: 'string', description: 'Root field handle (e.g. "sections") or parent item _id' },
+        type: { type: 'string', description: 'Set type handle for the new item' },
+        field: { type: 'string', description: 'Replicator field name within the parent item. Required when parent is an _id.' },
+        after_id: { type: 'string', description: 'Insert after this sibling _id. Omit to append.' },
+        fields: { type: 'object', description: 'Optional initial field values.' },
       },
-      required: ['type'],
+      required: ['parent', 'type'],
     },
   },
   {
-    name: 'delete_section',
-    description: 'Delete a section by its 0-based index.',
+    name: 'delete_item',
+    description: 'Delete any item by its _id — works for sections, tiles, or any nested replicator item.',
     input_schema: {
       type: 'object',
       properties: {
-        index: { type: 'integer', description: 'Zero-based section index to delete' },
+        id: { type: 'string', description: 'The _id of the item to delete' },
       },
-      required: ['index'],
+      required: ['id'],
     },
   },
   {
-    name: 'move_section',
-    description: 'Move a section from one position to another.',
+    name: 'move_item',
+    description: 'Reorder an item within its parent by _id. after_id must be a sibling. Omit after_id to move to the first position.',
     input_schema: {
       type: 'object',
       properties: {
-        from: { type: 'integer', description: 'Current 0-based index of the section' },
-        to: { type: 'integer', description: 'Target 0-based index after the move' },
+        id: { type: 'string', description: 'The _id of the item to move' },
+        after_id: { type: 'string', description: 'Move after this sibling _id. Omit to move to first position.' },
       },
-      required: ['from', 'to'],
+      required: ['id'],
     },
   },
   {
     name: 'update_field',
-    description: 'Update a top-level page field such as title or header. Use update_section for fields inside sections.',
+    description: 'Update a top-level scalar page field such as title or slug. For sections, tiles, or any replicator item use update_item instead.',
     input_schema: {
       type: 'object',
       properties: {
-        handle: { type: 'string', description: 'Field handle, e.g. "title" or "header"' },
+        handle: { type: 'string', description: 'Field handle, e.g. "title"' },
         value: { description: 'New value to set' },
       },
       required: ['handle', 'value'],
@@ -117,10 +191,15 @@ async function executeTool(name, input) {
     return value !== undefined ? { [input.handle]: value } : { error: `Field "${input.handle}" not found` };
   }
 
-  if (name === 'get_section') {
-    const sections = getSections(window.Statamic);
-    const section = sections?.[input.index];
-    return section ?? { error: `No section at index ${input.index}` };
+  if (name === 'get_item') {
+    const values = getPublishStore(window.Statamic)?.values;
+    if (!values) return { error: 'Publish store not found' };
+    for (const rootValue of Object.values(values)) {
+      if (!Array.isArray(rootValue)) continue;
+      const found = findItemWithParent(rootValue, input.id);
+      if (found) return found.item;
+    }
+    return { error: `Item "${input.id}" not found` };
   }
 
   if (name === 'get_blueprint') {
@@ -133,56 +212,85 @@ async function executeTool(name, input) {
     return fetchAssetsForAI(input.query);
   }
 
-  if (name === 'update_section') {
-    const sections = getSections(window.Statamic);
-    if (!sections) return { error: 'Could not get sections' };
-    const { index, fields } = input;
-    if (index < 0 || index >= sections.length) {
-      return { error: `Index ${index} out of range (0–${sections.length - 1})` };
+  if (name === 'update_item') {
+    const values = getPublishStore(window.Statamic)?.values;
+    if (!values) return { error: 'Publish store not found' };
+    for (const [rootHandle, rootValue] of Object.entries(values)) {
+      if (!Array.isArray(rootValue)) continue;
+      const cloned = cloneValue(rootValue);
+      if (patchItemInArray(cloned, input.id, input.fields)) {
+        pushUndoSnapshot();
+        commitField(window.Statamic, rootHandle, cloned);
+        return { ok: true };
+      }
     }
-    pushUndoSnapshot();
-    sections[index] = { ...sections[index], ...fields };
-    const ok = setSections(window.Statamic, sections);
-    return ok ? { ok: true, section: sections[index] } : { error: 'setSections failed' };
+    return { error: `Item "${input.id}" not found` };
   }
 
-  if (name === 'add_section') {
-    pushUndoSnapshot();
-    const sections = getSections(window.Statamic) ?? [];
-    const newSection = { type: input.type, enabled: true, ...(input.fields ?? {}) };
-    assignFreshSectionIdentity(newSection);
-    const afterIndex = input.after_index ?? sections.length - 1;
-    const insertAt = afterIndex < 0 ? sections.length : Math.min(afterIndex + 1, sections.length);
-    sections.splice(insertAt, 0, newSection);
-    const ok = setSections(window.Statamic, sections);
-    return ok ? { ok: true, index: insertAt, section: newSection } : { error: 'setSections failed' };
-  }
+  if (name === 'add_item') {
+    const values = getPublishStore(window.Statamic)?.values;
+    if (!values) return { error: 'Publish store not found' };
+    const { parent, type, field, after_id, fields = {} } = input;
+    const newItem = { _id: uid(), type, enabled: true, ...fields };
 
-  if (name === 'delete_section') {
-    const sections = getSections(window.Statamic);
-    if (!sections) return { error: 'Could not get sections' };
-    const { index } = input;
-    if (index < 0 || index >= sections.length) {
-      return { error: `Index ${index} out of range (0–${sections.length - 1})` };
+    if (typeof parent === 'string' && parent in values) {
+      const cloned = cloneValue(Array.isArray(values[parent]) ? values[parent] : []);
+      insertAfterIdOrAppend(cloned, newItem, after_id);
+      pushUndoSnapshot();
+      commitField(window.Statamic, parent, cloned);
+      return { ok: true, id: newItem._id };
     }
-    pushUndoSnapshot();
-    sections.splice(index, 1);
-    const ok = setSections(window.Statamic, sections);
-    return ok ? { ok: true, deleted_index: index } : { error: 'setSections failed' };
+
+    if (!field) return { error: 'field is required when parent is an item _id' };
+    for (const [rootHandle, rootValue] of Object.entries(values)) {
+      if (!Array.isArray(rootValue)) continue;
+      const cloned = cloneValue(rootValue);
+      if (addToParentItem(cloned, parent, field, newItem, after_id)) {
+        pushUndoSnapshot();
+        commitField(window.Statamic, rootHandle, cloned);
+        return { ok: true, id: newItem._id };
+      }
+    }
+    return { error: `Parent "${parent}" not found` };
   }
 
-  if (name === 'move_section') {
-    const sections = getSections(window.Statamic);
-    if (!sections) return { error: 'Could not get sections' };
-    const { from, to } = input;
-    if (from < 0 || from >= sections.length) return { error: `'from' index out of range` };
-    if (to < 0 || to >= sections.length) return { error: `'to' index out of range` };
-    if (from === to) return { ok: true, note: 'no change' };
-    pushUndoSnapshot();
-    const [moved] = sections.splice(from, 1);
-    sections.splice(to, 0, moved);
-    const ok = setSections(window.Statamic, sections);
-    return ok ? { ok: true, moved_to: to } : { error: 'setSections failed' };
+  if (name === 'delete_item') {
+    const values = getPublishStore(window.Statamic)?.values;
+    if (!values) return { error: 'Publish store not found' };
+    for (const [rootHandle, rootValue] of Object.entries(values)) {
+      if (!Array.isArray(rootValue)) continue;
+      const cloned = cloneValue(rootValue);
+      if (removeItemFromArray(cloned, input.id)) {
+        pushUndoSnapshot();
+        commitField(window.Statamic, rootHandle, cloned);
+        return { ok: true };
+      }
+    }
+    return { error: `Item "${input.id}" not found` };
+  }
+
+  if (name === 'move_item') {
+    const values = getPublishStore(window.Statamic)?.values;
+    if (!values) return { error: 'Publish store not found' };
+    for (const [rootHandle, rootValue] of Object.entries(values)) {
+      if (!Array.isArray(rootValue)) continue;
+      const cloned = cloneValue(rootValue);
+      const found = findItemWithParent(cloned, input.id);
+      if (!found) continue;
+      const { item, parentArray, index } = found;
+      parentArray.splice(index, 1);
+      if (!input.after_id) {
+        parentArray.unshift(item);
+      } else {
+        const afterIndex = parentArray.findIndex((i) => getItemId(i) === input.after_id);
+        if (afterIndex < 0) return { error: `after_id "${input.after_id}" not found among siblings` };
+        parentArray.splice(afterIndex + 1, 0, item);
+      }
+      pushUndoSnapshot();
+      commitField(window.Statamic, rootHandle, cloned);
+      return { ok: true };
+    }
+    return { error: `Item "${input.id}" not found` };
   }
 
   if (name === 'update_field') {
@@ -293,9 +401,12 @@ function buildSystemPrompt(getBrief) {
 The site is for a plastic surgery clinic in Frankfurt, Germany.
 You help with content suggestions, copywriting, and page structure advice.
 Respond concisely.
-When referring to sections to the user, use 1-based numbering (e.g. "section 1" = index 0, "section 2" = index 1). Tool calls always use 0-based indices.
-The page brief already contains every section's index, type, and key content. Do NOT call get_section before delete, move, or update operations — derive the index from the brief. Only call get_section when you need full raw data not visible in the brief (e.g. complete ProseMirror nodes of a bard field you intend to edit).
-BARD FIELDS use ProseMirror JSON. Always call get_field (for header/title) or get_section (for section bard fields) first, then make targeted changes to the returned structure. Never construct bard values from scratch. Key rules: text leaf nodes are {"type":"text","text":"..."} (not "value"); paragraphs are {"type":"paragraph","content":[...]}; bard set nodes are {"type":"set","attrs":{"id":"...","values":{...}}} where values contains the actual set fields.
+When referring to sections to the user, use 1-based numbering (e.g. "section 1", "section 2"). Tool calls always use _id values — never positional indexes.
+ITEM IDs: Every item in the brief (sections, tiles, accordion items, etc.) has a unique _id. Always use these in tool calls. Never guess or construct an _id.
+READING: The brief contains every item's _id, type, and key content. Do NOT call get_item before delete, move, or update_item — derive the _id from the brief. Only call get_item when you need full raw data not in the brief (e.g. complete ProseMirror nodes of a bard field you intend to edit).
+UPDATING: update_item patches any item at any depth by _id. To update a tile, accordion item, or any nested item, use its own _id directly — no need to reconstruct the parent array.
+ADDING: add_item takes parent + type. Use the root field handle as parent for top-level items (the top-level keys visible in the brief, e.g. "sections", "header"). For nested items (e.g. a tile inside a section) use the parent item's _id as parent and set field to the replicator field name (e.g. "tiles").
+BARD FIELDS use ProseMirror JSON. Always call get_field (for scalar top-level fields) or get_item (for bard fields inside any item) first, then make targeted changes to the returned structure. Never construct bard values from scratch. Key rules: text leaf nodes are {"type":"text","text":"..."} (not "value"); paragraphs are {"type":"paragraph","content":[...]}; bard set nodes are {"type":"set","attrs":{"id":"...","values":{...}}} where values contains the actual set fields.
 ASSET FIELDS store values as "assets::path/to/file.jpg" strings (with the assets:: prefix). Always include this prefix when setting an asset field.
 When passing a complex object or array as a tool argument value, pass it as a native JSON value — never as a JSON string.`;
 

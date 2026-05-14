@@ -179,6 +179,24 @@ export function setSections(statamic, nextSections) {
   return applied;
 }
 
+export function commitField(statamic, handle, value) {
+  if (handle === 'sections') return setSections(statamic, value);
+
+  const s = statamic ?? window.Statamic;
+  const moduleNames = getPublishModulesWithSections(s);
+  if (!moduleNames.length) return false;
+
+  let applied = false;
+  for (const moduleName of moduleNames) {
+    try {
+      s.$store.commit(`publish/${moduleName}/setFieldValue`, { handle, value });
+      s.$store.dispatch(`publish/${moduleName}/setFieldValue`, { handle, value });
+      applied = true;
+    } catch {}
+  }
+  return applied;
+}
+
 export function assignFreshSectionIdentity(section) {
   const nextId = uid();
 
