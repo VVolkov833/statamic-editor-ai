@@ -17,43 +17,23 @@ class ServiceProvider extends AddonServiceProvider
 
         Statamic::pushCpRoutes(function () {
             Route::post('section-tools/ai/chat', function (Request $request) {
-                $messages = $request->json('messages', []);
-                $system   = $request->json('system');
-                $tools    = $request->json('tools');
-
-                // PHP decodes empty JSON objects {} as [], which re-encodes as [].
-                // Cast tool_use input to stdClass wherever it appears in the messages array.
-                foreach ($messages as &$msg) {
-                    if (!is_array($msg['content'] ?? null)) continue;
-                    foreach ($msg['content'] as &$block) {
-                        if (($block['type'] ?? '') === 'tool_use' && ($block['input'] ?? null) === []) {
-                            $block['input'] = new \stdClass();
-                        }
-                    }
-                    unset($block);
-                }
-                unset($msg);
+                // Decode with json_decode(..., false) so JSON objects become stdClass,
+                // not PHP arrays. This preserves {} vs [] at every nesting depth when
+                // re-encoding, fixing the PHP [] → Anthropic {} mismatch completely.
+                $raw = json_decode($request->getContent(), false);
 
                 $payload = [
                     'model'      => env('ANTHROPIC_MODEL', 'claude-sonnet-4-6'),
                     'max_tokens' => (int) env('ANTHROPIC_MAX_TOKENS', 1024),
-                    'messages'   => $messages,
+                    'messages'   => $raw->messages ?? [],
                 ];
 
-                if ($system) {
-                    $payload['system'] = $system;
+                if (!empty($raw->system ?? null)) {
+                    $payload['system'] = $raw->system;
                 }
 
-                if (!empty($tools)) {
-                    // PHP decodes empty JSON objects {} as [], which re-encodes as [].
-                    // Anthropic requires properties to be a JSON object, so cast empty arrays.
-                    foreach ($tools as &$tool) {
-                        if (isset($tool['input_schema']['properties']) && $tool['input_schema']['properties'] === []) {
-                            $tool['input_schema']['properties'] = new \stdClass();
-                        }
-                    }
-                    unset($tool);
-                    $payload['tools'] = $tools;
+                if (!empty($raw->tools ?? null)) {
+                    $payload['tools'] = $raw->tools;
                 }
 
                 $response = Http::withHeaders([

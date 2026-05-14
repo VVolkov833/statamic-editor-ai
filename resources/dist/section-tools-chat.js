@@ -10,6 +10,17 @@ const MAX_ROUNDS = 8;
 
 const AI_TOOLS = [
   {
+    name: 'get_field',
+    description: 'Get the raw value of a top-level page field (e.g. header, title). Always call this before editing a bard or replicator field so you can see the exact structure to modify.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        handle: { type: 'string', description: 'Field handle, e.g. "header" or "title"' },
+      },
+      required: ['handle'],
+    },
+  },
+  {
     name: 'get_section',
     description: 'Get the full raw content of one section by its 0-based index.',
     input_schema: {
@@ -99,6 +110,13 @@ const AI_TOOLS = [
 ];
 
 async function executeTool(name, input) {
+  if (name === 'get_field') {
+    const values = getPublishStore(window.Statamic)?.values;
+    if (!values) return { error: 'Publish store not found' };
+    const value = values[input.handle];
+    return value !== undefined ? { [input.handle]: value } : { error: `Field "${input.handle}" not found` };
+  }
+
   if (name === 'get_section') {
     const sections = getSections(window.Statamic);
     const section = sections?.[input.index];
@@ -168,7 +186,12 @@ async function executeTool(name, input) {
   }
 
   if (name === 'update_field') {
-    const { handle, value } = input;
+    const handle = input.handle;
+    // Guard against Claude accidentally double-encoding the value as a JSON string.
+    let value = input.value;
+    if (typeof value === 'string') {
+      try { value = JSON.parse(value); } catch {}
+    }
     const moduleNames = getPublishModulesWithSections(window.Statamic);
     if (!moduleNames.length) return { error: 'Publish store not found' };
     let applied = false;
@@ -271,7 +294,10 @@ The site is for a plastic surgery clinic in Frankfurt, Germany.
 You help with content suggestions, copywriting, and page structure advice.
 Respond concisely.
 When referring to sections to the user, use 1-based numbering (e.g. "section 1" = index 0, "section 2" = index 1). Tool calls always use 0-based indices.
-The page brief already contains every section's index, type, and key content. Do NOT call get_section before delete, move, or update operations — derive the index from the brief. Only call get_section when you need full raw data not visible in the brief (e.g. complete ProseMirror nodes of a bard field you intend to edit).`;
+The page brief already contains every section's index, type, and key content. Do NOT call get_section before delete, move, or update operations — derive the index from the brief. Only call get_section when you need full raw data not visible in the brief (e.g. complete ProseMirror nodes of a bard field you intend to edit).
+BARD FIELDS use ProseMirror JSON. Always call get_field (for header/title) or get_section (for section bard fields) first, then make targeted changes to the returned structure. Never construct bard values from scratch. Key rules: text leaf nodes are {"type":"text","text":"..."} (not "value"); paragraphs are {"type":"paragraph","content":[...]}; bard set nodes are {"type":"set","attrs":{"id":"...","values":{...}}} where values contains the actual set fields.
+ASSET FIELDS store values as "assets::path/to/file.jpg" strings (with the assets:: prefix). Always include this prefix when setting an asset field.
+When passing a complex object or array as a tool argument value, pass it as a native JSON value — never as a JSON string.`;
 
   return briefJson
     ? `${role}\n\nCurrent page brief:\n\`\`\`json\n${briefJson}\n\`\`\``
