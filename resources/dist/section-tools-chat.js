@@ -1,5 +1,6 @@
-import { getPublishStore, getSections } from './section-tools-lib.js';
+import { getPublishStore, getSections, setSections, assignFreshSectionIdentity, uid, getPublishModulesWithSections } from './section-tools-lib.js';
 import { simplifyBlueprintNode, fetchAssetsForAI } from './section-tools-queries.js';
+import { pushUndoSnapshot } from './section-tools-mutations.js';
 
 let messages = [];
 let totalInputTokens = 0;
@@ -35,6 +36,66 @@ const AI_TOOLS = [
       required: ['query'],
     },
   },
+  {
+    name: 'update_section',
+    description: 'Patch fields on an existing section. Only supplied fields change; others are preserved. Do not change _id.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        index: { type: 'integer', description: 'Zero-based section index' },
+        fields: { type: 'object', description: 'Key-value pairs of fields to set on the section' },
+      },
+      required: ['index', 'fields'],
+    },
+  },
+  {
+    name: 'add_section',
+    description: 'Insert a new section. Supply fields to set content immediately and avoid a separate update_section call.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', description: 'Section type handle, e.g. "text" or "quote"' },
+        after_index: { type: 'integer', description: 'Insert after this 0-based index. Omit or use -1 to append.' },
+        fields: { type: 'object', description: 'Optional fields to set on the new section immediately.' },
+      },
+      required: ['type'],
+    },
+  },
+  {
+    name: 'delete_section',
+    description: 'Delete a section by its 0-based index.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        index: { type: 'integer', description: 'Zero-based section index to delete' },
+      },
+      required: ['index'],
+    },
+  },
+  {
+    name: 'move_section',
+    description: 'Move a section from one position to another.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        from: { type: 'integer', description: 'Current 0-based index of the section' },
+        to: { type: 'integer', description: 'Target 0-based index after the move' },
+      },
+      required: ['from', 'to'],
+    },
+  },
+  {
+    name: 'update_field',
+    description: 'Update a top-level page field such as title or header. Use update_section for fields inside sections.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        handle: { type: 'string', description: 'Field handle, e.g. "title" or "header"' },
+        value: { description: 'New value to set' },
+      },
+      required: ['handle', 'value'],
+    },
+  },
 ];
 
 async function executeTool(name, input) {
@@ -52,6 +113,73 @@ async function executeTool(name, input) {
 
   if (name === 'search_assets') {
     return fetchAssetsForAI(input.query);
+  }
+
+  if (name === 'update_section') {
+    const sections = getSections(window.Statamic);
+    if (!sections) return { error: 'Could not get sections' };
+    const { index, fields } = input;
+    if (index < 0 || index >= sections.length) {
+      return { error: `Index ${index} out of range (0–${sections.length - 1})` };
+    }
+    pushUndoSnapshot();
+    sections[index] = { ...sections[index], ...fields };
+    const ok = setSections(window.Statamic, sections);
+    return ok ? { ok: true, section: sections[index] } : { error: 'setSections failed' };
+  }
+
+  if (name === 'add_section') {
+    pushUndoSnapshot();
+    const sections = getSections(window.Statamic) ?? [];
+    const newSection = { type: input.type, enabled: true, ...(input.fields ?? {}) };
+    assignFreshSectionIdentity(newSection);
+    const afterIndex = input.after_index ?? sections.length - 1;
+    const insertAt = afterIndex < 0 ? sections.length : Math.min(afterIndex + 1, sections.length);
+    sections.splice(insertAt, 0, newSection);
+    const ok = setSections(window.Statamic, sections);
+    return ok ? { ok: true, index: insertAt, section: newSection } : { error: 'setSections failed' };
+  }
+
+  if (name === 'delete_section') {
+    const sections = getSections(window.Statamic);
+    if (!sections) return { error: 'Could not get sections' };
+    const { index } = input;
+    if (index < 0 || index >= sections.length) {
+      return { error: `Index ${index} out of range (0–${sections.length - 1})` };
+    }
+    pushUndoSnapshot();
+    sections.splice(index, 1);
+    const ok = setSections(window.Statamic, sections);
+    return ok ? { ok: true, deleted_index: index } : { error: 'setSections failed' };
+  }
+
+  if (name === 'move_section') {
+    const sections = getSections(window.Statamic);
+    if (!sections) return { error: 'Could not get sections' };
+    const { from, to } = input;
+    if (from < 0 || from >= sections.length) return { error: `'from' index out of range` };
+    if (to < 0 || to >= sections.length) return { error: `'to' index out of range` };
+    if (from === to) return { ok: true, note: 'no change' };
+    pushUndoSnapshot();
+    const [moved] = sections.splice(from, 1);
+    sections.splice(to, 0, moved);
+    const ok = setSections(window.Statamic, sections);
+    return ok ? { ok: true, moved_to: to } : { error: 'setSections failed' };
+  }
+
+  if (name === 'update_field') {
+    const { handle, value } = input;
+    const moduleNames = getPublishModulesWithSections(window.Statamic);
+    if (!moduleNames.length) return { error: 'Publish store not found' };
+    let applied = false;
+    for (const moduleName of moduleNames) {
+      try {
+        window.Statamic.$store.commit(`publish/${moduleName}/setFieldValue`, { handle, value });
+        window.Statamic.$store.dispatch(`publish/${moduleName}/setFieldValue`, { handle, value });
+        applied = true;
+      } catch {}
+    }
+    return applied ? { ok: true, handle } : { error: 'setFieldValue failed' };
   }
 
   return { error: `Unknown tool: ${name}` };
@@ -138,7 +266,12 @@ function buildSystemPrompt(getBrief) {
   const brief = getBrief?.();
   const briefJson = brief ? JSON.stringify(brief, null, 2) : null;
 
-  const role = `You are an AI assistant helping a web editor manage page content in a Statamic CMS.\nThe site is for a plastic surgery clinic in Frankfurt, Germany.\nYou help with content suggestions, copywriting, and page structure advice.\nRespond concisely. When referencing sections, use their index and type.`;
+  const role = `You are an AI assistant helping a web editor manage page content in a Statamic CMS.
+The site is for a plastic surgery clinic in Frankfurt, Germany.
+You help with content suggestions, copywriting, and page structure advice.
+Respond concisely.
+When referring to sections to the user, use 1-based numbering (e.g. "section 1" = index 0, "section 2" = index 1). Tool calls always use 0-based indices.
+The page brief already contains every section's index, type, and key content. Do NOT call get_section before delete, move, or update operations — derive the index from the brief. Only call get_section when you need full raw data not visible in the brief (e.g. complete ProseMirror nodes of a bard field you intend to edit).`;
 
   return briefJson
     ? `${role}\n\nCurrent page brief:\n\`\`\`json\n${briefJson}\n\`\`\``
@@ -320,7 +453,10 @@ export function createChatSection(getBrief) {
       appendMessage(history, 'assistant', finalText);
     } catch (err) {
       messages.splice(msgCountBefore);
-      appendMessage(history, 'assistant', `Error: ${err.message}`);
+      const display = err.message.includes('429')
+        ? 'Rate limit hit — wait a few seconds and try again.'
+        : `Error: ${err.message}`;
+      appendMessage(history, 'assistant', display);
     } finally {
       textarea.disabled = false;
       sendBtn.disabled = false;
