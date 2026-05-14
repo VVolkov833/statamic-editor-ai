@@ -1,15 +1,71 @@
+import { getPublishStore, getSections } from './section-tools-lib.js';
+import { simplifyBlueprintNode, fetchAssetsForAI } from './section-tools-queries.js';
+
 let messages = [];
 let totalInputTokens = 0;
 let totalOutputTokens = 0;
+
+const MAX_ROUNDS = 8;
+
+const AI_TOOLS = [
+  {
+    name: 'get_section',
+    description: 'Get the full raw content of one section by its 0-based index.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        index: { type: 'integer', description: 'Zero-based section index' },
+      },
+      required: ['index'],
+    },
+  },
+  {
+    name: 'get_blueprint',
+    description: 'Get the page blueprint — all available section types and their fields.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'search_assets',
+    description: 'Search for media assets by filename or alt text.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search term to match against filename or alt text' },
+      },
+      required: ['query'],
+    },
+  },
+];
+
+async function executeTool(name, input) {
+  if (name === 'get_section') {
+    const sections = getSections(window.Statamic);
+    const section = sections?.[input.index];
+    return section ?? { error: `No section at index ${input.index}` };
+  }
+
+  if (name === 'get_blueprint') {
+    const blueprint = getPublishStore(window.Statamic)?.blueprint;
+    if (!blueprint) return { error: 'Blueprint not found' };
+    return simplifyBlueprintNode(blueprint) ?? {};
+  }
+
+  if (name === 'search_assets') {
+    return fetchAssetsForAI(input.query);
+  }
+
+  return { error: `Unknown tool: ${name}` };
+}
 
 function getXsrfToken() {
   const match = document.cookie.match(/(?:^|;\s*)XSRF-TOKEN=([^;]+)/);
   return match ? decodeURIComponent(match[1]) : '';
 }
 
-async function sendToClaude(allMessages, systemPrompt) {
+async function sendToClaude(allMessages, systemPrompt, tools) {
   const body = { messages: allMessages };
   if (systemPrompt) body.system = systemPrompt;
+  if (tools?.length) body.tools = tools;
 
   const response = await fetch('/cp/section-tools/ai/chat', {
     method: 'POST',
@@ -48,6 +104,30 @@ function appendMessage(historyEl, role, text) {
   msg.textContent = text;
   historyEl.appendChild(msg);
   historyEl.scrollTop = historyEl.scrollHeight;
+  return msg;
+}
+
+function appendTechnical(historyEl, text, dimmer = false) {
+  const msg = document.createElement('div');
+  msg.dataset.technical = '1';
+  msg.style.fontFamily = 'monospace';
+  msg.style.fontSize = '10px';
+  msg.style.lineHeight = '1.4';
+  msg.style.padding = '2px 4px';
+  msg.style.marginBottom = '2px';
+  msg.style.color = dimmer ? 'rgba(0,0,0,0.25)' : 'rgba(0,0,0,0.38)';
+  msg.style.wordBreak = 'break-all';
+  msg.style.whiteSpace = 'pre-wrap';
+  msg.textContent = text;
+  historyEl.appendChild(msg);
+  historyEl.scrollTop = historyEl.scrollHeight;
+  return msg;
+}
+
+function setTechnicalVisibility(historyEl, visible) {
+  historyEl.querySelectorAll('[data-technical]').forEach((el) => {
+    el.style.display = visible ? '' : 'none';
+  });
 }
 
 function updateTokenDisplay(tokenEl) {
@@ -66,12 +146,47 @@ function buildSystemPrompt(getBrief) {
 }
 
 export function createChatSection(getBrief) {
+  let showTechnical = true;
+
   const section = document.createElement('div');
   section.style.display = 'flex';
   section.style.flexDirection = 'column';
   section.style.gap = '5px';
   section.style.paddingBottom = '8px';
   section.style.borderBottom = '1px solid rgba(0,0,0,0.1)';
+
+  // Header row: label + show/hide toggle
+  const headerRow = document.createElement('div');
+  headerRow.style.display = 'flex';
+  headerRow.style.justifyContent = 'space-between';
+  headerRow.style.alignItems = 'center';
+
+  const chatLabel = document.createElement('span');
+  chatLabel.textContent = 'Chat';
+  chatLabel.style.fontSize = '10px';
+  chatLabel.style.fontWeight = '600';
+  chatLabel.style.color = 'rgba(0,0,0,0.4)';
+  chatLabel.style.textTransform = 'uppercase';
+  chatLabel.style.letterSpacing = '0.05em';
+
+  const techToggle = document.createElement('button');
+  techToggle.type = 'button';
+  techToggle.textContent = 'hide technical';
+  techToggle.style.fontSize = '10px';
+  techToggle.style.background = 'none';
+  techToggle.style.border = 'none';
+  techToggle.style.cursor = 'pointer';
+  techToggle.style.color = 'rgba(0,0,0,0.35)';
+  techToggle.style.padding = '0';
+
+  techToggle.addEventListener('click', () => {
+    showTechnical = !showTechnical;
+    techToggle.textContent = showTechnical ? 'hide technical' : 'show technical';
+    setTechnicalVisibility(history, showTechnical);
+  });
+
+  headerRow.appendChild(chatLabel);
+  headerRow.appendChild(techToggle);
 
   const history = document.createElement('div');
   history.style.maxHeight = '180px';
@@ -113,6 +228,7 @@ export function createChatSection(getBrief) {
   inputRow.appendChild(textarea);
   inputRow.appendChild(sendBtn);
 
+  section.appendChild(headerRow);
   section.appendChild(history);
   section.appendChild(inputRow);
   section.appendChild(tokenInfo);
@@ -129,19 +245,82 @@ export function createChatSection(getBrief) {
     messages.push({ role: 'user', content: text });
     appendMessage(history, 'user', text);
 
-    try {
-      const systemPrompt = buildSystemPrompt(getBrief);
-      const data = await sendToClaude(messages, systemPrompt);
-      const reply = data.content?.[0]?.text ?? '[no response]';
-      messages.push({ role: 'assistant', content: reply });
-      appendMessage(history, 'assistant', reply);
+    const systemPrompt = buildSystemPrompt(getBrief);
+    const msgCountBefore = messages.length;
 
-      totalInputTokens += data.usage?.input_tokens ?? 0;
-      totalOutputTokens += data.usage?.output_tokens ?? 0;
-      updateTokenDisplay(tokenInfo);
+    try {
+      let lastToolSignature = null;
+      let finalText = null;
+
+      for (let round = 0; round < MAX_ROUNDS; round++) {
+        if (round > 0) sendBtn.textContent = `step ${round + 1}/${MAX_ROUNDS}…`;
+
+        const data = await sendToClaude(messages, systemPrompt, AI_TOOLS);
+
+        totalInputTokens += data.usage?.input_tokens ?? 0;
+        totalOutputTokens += data.usage?.output_tokens ?? 0;
+        updateTokenDisplay(tokenInfo);
+
+        if (data.stop_reason !== 'tool_use') {
+          finalText = data.content?.find((b) => b.type === 'text')?.text ?? '[no response]';
+          break;
+        }
+
+        // Append assistant message with tool_use blocks
+        messages.push({ role: 'assistant', content: data.content });
+
+        const toolUseBlocks = data.content.filter((b) => b.type === 'tool_use');
+
+        // Stuck loop detection
+        if (toolUseBlocks.length === 1) {
+          const sig = `${toolUseBlocks[0].name}:${JSON.stringify(toolUseBlocks[0].input)}`;
+          if (sig === lastToolSignature) {
+            finalText = '[stopped: repeated tool call detected]';
+            break;
+          }
+          lastToolSignature = sig;
+        } else {
+          lastToolSignature = null;
+        }
+
+        // Show any text Claude included alongside the tool call
+        const textBlock = data.content.find((b) => b.type === 'text' && b.text?.trim());
+        if (textBlock) appendMessage(history, 'assistant', textBlock.text);
+
+        // Execute tools
+        const toolResults = [];
+        for (const block of toolUseBlocks) {
+          const callMsg = appendTechnical(history, `→ ${block.name}(${JSON.stringify(block.input)})`, false);
+          if (!showTechnical) callMsg.style.display = 'none';
+
+          let result;
+          try {
+            result = await executeTool(block.name, block.input);
+          } catch (err) {
+            result = { error: err.message };
+          }
+
+          const preview = JSON.stringify(result);
+          const resultMsg = appendTechnical(history, `← ${preview.length > 300 ? preview.slice(0, 300) + '…' : preview}`, true);
+          if (!showTechnical) resultMsg.style.display = 'none';
+
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: JSON.stringify(result),
+          });
+        }
+
+        messages.push({ role: 'user', content: toolResults });
+      }
+
+      if (finalText === null) finalText = '[max steps reached]';
+
+      messages.push({ role: 'assistant', content: finalText });
+      appendMessage(history, 'assistant', finalText);
     } catch (err) {
+      messages.splice(msgCountBefore);
       appendMessage(history, 'assistant', `Error: ${err.message}`);
-      messages.pop();
     } finally {
       textarea.disabled = false;
       sendBtn.disabled = false;

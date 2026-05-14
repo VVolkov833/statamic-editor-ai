@@ -19,6 +19,20 @@ class ServiceProvider extends AddonServiceProvider
             Route::post('section-tools/ai/chat', function (Request $request) {
                 $messages = $request->json('messages', []);
                 $system   = $request->json('system');
+                $tools    = $request->json('tools');
+
+                // PHP decodes empty JSON objects {} as [], which re-encodes as [].
+                // Cast tool_use input to stdClass wherever it appears in the messages array.
+                foreach ($messages as &$msg) {
+                    if (!is_array($msg['content'] ?? null)) continue;
+                    foreach ($msg['content'] as &$block) {
+                        if (($block['type'] ?? '') === 'tool_use' && ($block['input'] ?? null) === []) {
+                            $block['input'] = new \stdClass();
+                        }
+                    }
+                    unset($block);
+                }
+                unset($msg);
 
                 $payload = [
                     'model'      => env('ANTHROPIC_MODEL', 'claude-sonnet-4-6'),
@@ -30,10 +44,26 @@ class ServiceProvider extends AddonServiceProvider
                     $payload['system'] = $system;
                 }
 
+                if (!empty($tools)) {
+                    // PHP decodes empty JSON objects {} as [], which re-encodes as [].
+                    // Anthropic requires properties to be a JSON object, so cast empty arrays.
+                    foreach ($tools as &$tool) {
+                        if (isset($tool['input_schema']['properties']) && $tool['input_schema']['properties'] === []) {
+                            $tool['input_schema']['properties'] = new \stdClass();
+                        }
+                    }
+                    unset($tool);
+                    $payload['tools'] = $tools;
+                }
+
                 $response = Http::withHeaders([
                     'x-api-key'         => env('ANTHROPIC_API_KEY'),
                     'anthropic-version' => '2023-06-01',
                 ])->post('https://api.anthropic.com/v1/messages', $payload);
+
+                if ($response->status() >= 400) {
+                    \Illuminate\Support\Facades\Log::error('Anthropic error', ['status' => $response->status(), 'body' => $response->json()]);
+                }
 
                 return response()->json($response->json(), $response->status());
             });

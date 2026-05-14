@@ -51,7 +51,7 @@ function getBlueprintHandleForElement(element) {
   return typeof element.type === 'string' ? element.type : null;
 }
 
-function simplifyBlueprintNode(node) {
+export function simplifyBlueprintNode(node) {
   if (node == null) {
     return undefined;
   }
@@ -302,4 +302,14 @@ export async function searchAssets(query) {
 
 export function logAssetSearch() {
   searchAssets('Oberschenkel');
+}
+
+export async function fetchAssetsForAI(query) {
+  const cpRoot = window.Statamic?.$config?.get('cp_root') ?? '/cp';
+  const res = await fetch(
+    `${cpRoot}/section-tools/assets/search?query=${encodeURIComponent(query)}`,
+    { headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' } },
+  );
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
 }
