@@ -7,14 +7,17 @@ function getXsrfToken() {
   return match ? decodeURIComponent(match[1]) : '';
 }
 
-async function sendToClaude(allMessages) {
+async function sendToClaude(allMessages, systemPrompt) {
+  const body = { messages: allMessages };
+  if (systemPrompt) body.system = systemPrompt;
+
   const response = await fetch('/cp/section-tools/ai/chat', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'X-XSRF-TOKEN': getXsrfToken(),
     },
-    body: JSON.stringify({ messages: allMessages }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {
@@ -51,7 +54,18 @@ function updateTokenDisplay(tokenEl) {
   tokenEl.textContent = `↑${totalInputTokens} ↓${totalOutputTokens} tokens`;
 }
 
-export function createChatSection() {
+function buildSystemPrompt(getBrief) {
+  const brief = getBrief?.();
+  const briefJson = brief ? JSON.stringify(brief, null, 2) : null;
+
+  const role = `You are an AI assistant helping a web editor manage page content in a Statamic CMS.\nThe site is for a plastic surgery clinic in Frankfurt, Germany.\nYou help with content suggestions, copywriting, and page structure advice.\nRespond concisely. When referencing sections, use their index and type.`;
+
+  return briefJson
+    ? `${role}\n\nCurrent page brief:\n\`\`\`json\n${briefJson}\n\`\`\``
+    : role;
+}
+
+export function createChatSection(getBrief) {
   const section = document.createElement('div');
   section.style.display = 'flex';
   section.style.flexDirection = 'column';
@@ -116,7 +130,8 @@ export function createChatSection() {
     appendMessage(history, 'user', text);
 
     try {
-      const data = await sendToClaude(messages);
+      const systemPrompt = buildSystemPrompt(getBrief);
+      const data = await sendToClaude(messages, systemPrompt);
       const reply = data.content?.[0]?.text ?? '[no response]';
       messages.push({ role: 'assistant', content: reply });
       appendMessage(history, 'assistant', reply);

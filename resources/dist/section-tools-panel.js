@@ -1,4 +1,5 @@
 import { createChatSection } from './section-tools-chat.js';
+import { buildPageBrief } from './section-tools-lib.js';
 
 const PANEL_ID = 'section-tools-floating-panel';
 const PANEL_HANDLE_ID = 'section-tools-floating-panel-handle';
@@ -154,7 +155,7 @@ function createFloatingPanel(actions, panelStorageKey) {
   handle.style.color = 'var(--text, #111)';
 
   panel.appendChild(handle);
-  panel.appendChild(createChatSection());
+  panel.appendChild(createChatSection(() => buildPageBrief()));
   panel.appendChild(createPanelGroup(actions));
   makePanelDraggable(panel, handle, panelStorageKey);
 

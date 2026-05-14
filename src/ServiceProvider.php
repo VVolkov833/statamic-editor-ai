@@ -18,15 +18,22 @@ class ServiceProvider extends AddonServiceProvider
         Statamic::pushCpRoutes(function () {
             Route::post('section-tools/ai/chat', function (Request $request) {
                 $messages = $request->json('messages', []);
+                $system   = $request->json('system');
+
+                $payload = [
+                    'model'      => env('ANTHROPIC_MODEL', 'claude-sonnet-4-6'),
+                    'max_tokens' => (int) env('ANTHROPIC_MAX_TOKENS', 1024),
+                    'messages'   => $messages,
+                ];
+
+                if ($system) {
+                    $payload['system'] = $system;
+                }
 
                 $response = Http::withHeaders([
                     'x-api-key'         => env('ANTHROPIC_API_KEY'),
                     'anthropic-version' => '2023-06-01',
-                ])->post('https://api.anthropic.com/v1/messages', [
-                    'model'      => env('ANTHROPIC_MODEL', 'claude-sonnet-4-6'),
-                    'max_tokens' => (int) env('ANTHROPIC_MAX_TOKENS', 1024),
-                    'messages'   => $messages,
-                ]);
+                ])->post('https://api.anthropic.com/v1/messages', $payload);
 
                 return response()->json($response->json(), $response->status());
             });
