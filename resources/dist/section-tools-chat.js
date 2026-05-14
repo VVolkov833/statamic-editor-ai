@@ -82,6 +82,45 @@ function addToParentItem(arr, parentId, fieldHandle, newItem, afterId) {
   return false;
 }
 
+function buildItemDefaults(blueprint, type) {
+  if (!blueprint || !type) return {};
+
+  function findSetFields(node) {
+    if (!node || typeof node !== 'object') return null;
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const found = findSetFields(item);
+        if (found) return found;
+      }
+      return null;
+    }
+    if (typeof node.handle === 'string' && node.handle === type && Array.isArray(node.fields)) {
+      return node.fields;
+    }
+    for (const value of Object.values(node)) {
+      const found = findSetFields(value);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  const fields = findSetFields(blueprint);
+  if (!fields) return {};
+
+  const defaults = {};
+  const ARRAY_TYPES = new Set(['replicator', 'grid', 'bard', 'checkboxes', 'list', 'tags', 'assets']);
+  for (const field of fields) {
+    if (!field.handle) continue;
+    const fieldType = field.type ?? field.component ?? '';
+    if (ARRAY_TYPES.has(fieldType)) {
+      defaults[field.handle] = [];
+    } else if (Object.prototype.hasOwnProperty.call(field, 'default') && field.default != null) {
+      defaults[field.handle] = field.default;
+    }
+  }
+  return defaults;
+}
+
 let messages = [];
 let totalInputTokens = 0;
 let totalOutputTokens = 0;
@@ -241,7 +280,9 @@ async function executeTool(name, input) {
     const values = getPublishStore(window.Statamic)?.values;
     if (!values) return { error: 'Publish store not found' };
     const { parent, type, field, after_id, fields = {} } = input;
-    const newItem = { _id: uid(), type, enabled: true, ...fields };
+    const blueprint = getPublishStore(window.Statamic)?.blueprint;
+    const defaults = buildItemDefaults(blueprint, type);
+    const newItem = { _id: uid(), type, enabled: true, ...defaults, ...fields };
 
     if (typeof parent === 'string' && parent in values) {
       const cloned = cloneValue(Array.isArray(values[parent]) ? values[parent] : []);
@@ -274,7 +315,7 @@ async function executeTool(name, input) {
       if (type !== false) {
         pushUndoSnapshot();
         commitField(window.Statamic, rootHandle, cloned);
-        return { ok: true, type };
+        return { ok: true, type, note: `id ${input.id} is no longer in page structure` };
       }
     }
     return { error: `Item "${input.id}" not found` };
@@ -414,7 +455,8 @@ You help with content suggestions, copywriting, and page structure advice.
 Respond concisely.
 When referring to sections to the user, use 1-based numbering (e.g. "section 1", "section 2"). Tool calls always use _id values — never positional indexes.
 ITEM IDs: Every item in the brief (sections, tiles, accordion items, etc.) has a unique _id. Always use these in tool calls. Never guess or construct an _id — if you cannot find the exact _id in the brief, stop and ask the user to clarify instead of proceeding. Write tool responses include a "type" field confirming what was affected — verify it matches your intention before continuing.
-BRIEF: The brief is rebuilt after every write operation and always reflects current page state. Always read _ids from the current brief — never reuse _ids from earlier in this conversation, which may reference deleted or changed items.
+BRIEF: The brief is rebuilt after every write operation and always reflects current page state. The current brief is the complete page structure — any item not listed in it does not exist on the page.
+HIERARCHY: The word "section" always means a top-level entry in the sections array. Items nested inside a section (tiles, accordion items, quotes within a tiles set, etc.) are sub-items of that section — not sections themselves. When looking for a section by type, only consider top-level entries.
 READING: The brief contains every item's _id, type, and key content. Do NOT call get_item before delete, move, or update_item — derive the _id from the brief. Only call get_item when you need full raw data not in the brief (e.g. complete ProseMirror nodes of a bard field you intend to edit).
 UPDATING: update_item patches any item at any depth by _id. To update a tile, accordion item, or any nested item, use its own _id directly — no need to reconstruct the parent array.
 ADDING: add_item takes parent + type. Use the root field handle as parent for top-level items (the top-level keys visible in the brief, e.g. "sections", "header"). For nested items (e.g. a tile inside a section) use the parent item's _id as parent and set field to the replicator field name (e.g. "tiles").
