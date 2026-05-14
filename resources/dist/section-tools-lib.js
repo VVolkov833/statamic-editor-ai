@@ -98,9 +98,12 @@ export function syncSectionsMeta(meta, previousSections, nextSections) {
         return candidateSection?.type === section?.type;
       }) ?? null;
 
+      const typeTemplate = sectionsMeta.new?.[section?.type];
       sectionsMeta.existing[id] = templateId
         ? cloneValue(sectionsMeta.existing[templateId])
-        : { _: '_' };
+        : typeTemplate
+          ? cloneValue(typeTemplate)
+          : { _: '_' };
     }
 
     if (!sectionsMeta.previews[id]) {

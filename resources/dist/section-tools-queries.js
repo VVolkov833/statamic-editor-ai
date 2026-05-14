@@ -304,6 +304,50 @@ export function logAssetSearch() {
   searchAssets('Oberschenkel');
 }
 
+export function extractBlueprintSets(blueprint) {
+  const sets = {};
+
+  function traverse(node, ancestorSetHandle) {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach((item) => traverse(item, ancestorSetHandle)); return; }
+    if (
+      typeof node.handle === 'string' &&
+      typeof node.display === 'string' &&
+      node.type == null &&
+      Array.isArray(node.fields) &&
+      node.fields.length > 0
+    ) {
+      const entry = {
+        display: node.display,
+        handle: node.handle,
+        fields: node.fields
+          .filter((f) => f && typeof f.handle === 'string')
+          .map((f) => {
+            const slim = { handle: f.handle };
+            const t = f.type ?? f.component ?? '';
+            if (t) slim.type = t;
+            if (f.display) slim.display = f.display;
+            if (f.required) slim.required = true;
+            if (typeof f.max_files === 'number') slim.max_files = f.max_files;
+            if (f.options) slim.options = f.options;
+            if (f.character_limit) slim.character_limit = f.character_limit;
+            return slim;
+          }),
+      };
+      if (ancestorSetHandle) entry._parent_set = ancestorSetHandle;
+      sets[node.handle] = entry;
+      // Traverse this set's fields with this set as the ancestor, so nested set types
+      // inherit _parent_set = this set's handle.
+      node.fields.forEach((field) => traverse(field, node.handle));
+      return;
+    }
+    Object.values(node).forEach((v) => traverse(v, ancestorSetHandle));
+  }
+
+  traverse(blueprint, null);
+  return sets;
+}
+
 export async function fetchAssetsForAI(query) {
   const cpRoot = window.Statamic?.$config?.get('cp_root') ?? '/cp';
   const res = await fetch(

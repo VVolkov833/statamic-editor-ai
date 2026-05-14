@@ -1,6 +1,49 @@
 import { getPublishStore, getSections, setSections, assignFreshSectionIdentity, uid, getPublishModulesWithSections, cloneValue, commitField } from './section-tools-lib.js';
-import { simplifyBlueprintNode, fetchAssetsForAI } from './section-tools-queries.js';
+import { simplifyBlueprintNode, fetchAssetsForAI, extractBlueprintSets } from './section-tools-queries.js';
 import { pushUndoSnapshot } from './section-tools-mutations.js';
+
+function injectNestedItemMeta(statamic, rootHandle, parentId, field, newItemId, type) {
+  const publishStore = getPublishStore(statamic);
+  const meta = publishStore?.meta;
+  if (!meta) return;
+
+  const rootFieldMeta = meta[rootHandle];
+  if (!rootFieldMeta?.existing?.[parentId]) return;
+
+  const parentMeta = rootFieldMeta.existing[parentId];
+  const nestedFieldMeta = parentMeta[field];
+  if (!nestedFieldMeta) return;
+
+  const typeTemplate = nestedFieldMeta?.new?.[type];
+
+  const updatedMeta = {
+    ...meta,
+    [rootHandle]: {
+      ...rootFieldMeta,
+      existing: {
+        ...rootFieldMeta.existing,
+        [parentId]: {
+          ...parentMeta,
+          [field]: {
+            ...nestedFieldMeta,
+            existing: {
+              ...(nestedFieldMeta.existing ?? {}),
+              [newItemId]: typeTemplate ? cloneValue(typeTemplate) : {},
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const moduleNames = getPublishModulesWithSections(statamic);
+  for (const moduleName of moduleNames) {
+    try {
+      statamic.$store.commit(`publish/${moduleName}/setMeta`, updatedMeta);
+      statamic.$store.dispatch(`publish/${moduleName}/setMeta`, updatedMeta);
+    } catch {}
+  }
+}
 
 function getItemId(item) {
   return item?._id ?? item?.id ?? item?.key ?? null;
@@ -11,6 +54,10 @@ function patchItemInArray(arr, targetId, fields) {
     const item = arr[i];
     if (!item || typeof item !== 'object') continue;
     if (getItemId(item) === targetId) {
+      if (item.type === 'set' && item.attrs?.values != null) {
+        arr[i] = { ...item, attrs: { ...item.attrs, values: { ...item.attrs.values, ...fields } } };
+        return item.attrs.values.type ?? 'set';
+      }
       const type = item.type ?? null;
       arr[i] = { ...item, ...fields };
       return type;
@@ -82,34 +129,172 @@ function addToParentItem(arr, parentId, fieldHandle, newItem, afterId) {
   return false;
 }
 
-function buildItemDefaults(blueprint, type) {
+const BARD_BLOCK_TYPES = new Set([
+  'paragraph', 'heading', 'bulletList', 'orderedList', 'listItem',
+  'blockquote', 'codeBlock', 'horizontalRule', 'set', 'table',
+  'tableRow', 'tableCell', 'tableHeader',
+]);
+
+function inlineImageToBardSet(src) {
+  return { type: 'set', attrs: { id: uid(), values: { type: 'image', enabled: true, image: src ? [src] : [] } } };
+}
+
+function sanitizeBardContent(arr, blueprint) {
+  if (!Array.isArray(arr)) return arr;
+  // Only apply to arrays that look like ProseMirror block content
+  if (!arr.some((n) => n && typeof n === 'object' && BARD_BLOCK_TYPES.has(n.type))) return arr;
+
+  // flatMap so a single block node can expand to multiple (e.g. paragraph → paragraph + image sets)
+  return arr
+    .filter((node) => node != null && typeof node === 'object')
+    .flatMap((node) => {
+      // TipTap inline image node at block level — promote to bard image set
+      if (node.type === 'image') {
+        return [inlineImageToBardSet(node.attrs?.src)];
+      }
+
+      // Other non-block types — wrap text in paragraph
+      if (!BARD_BLOCK_TYPES.has(node.type)) {
+        const t = typeof node.text === 'string' ? node.text
+          : typeof node.value === 'string' ? node.value : '';
+        return [{ type: 'paragraph', content: [{ type: 'text', text: t }] }];
+      }
+
+      const result = { ...node };
+
+      // text nodes: fix value→text, ensure text is a string
+      if (node.type === 'text') {
+        if (result.value !== undefined && result.text === undefined) {
+          result.text = result.value;
+          delete result.value;
+        }
+        if (typeof result.text !== 'string') result.text = '';
+        return [result];
+      }
+
+      // heading: ensure textAlign is present (ProseMirror schema requires it)
+      if (node.type === 'heading') {
+        result.attrs = { textAlign: 'left', ...node.attrs };
+      }
+
+      // paragraph: ensure textAlign is present if attrs exist
+      if (node.type === 'paragraph' && node.attrs) {
+        result.attrs = { textAlign: 'left', ...node.attrs };
+      }
+
+      // bard set: ensure attrs.id; initialize missing sub-fields via blueprint
+      if (node.type === 'set' && node.attrs != null) {
+        if (!node.attrs.id) result.attrs = { ...node.attrs, id: uid() };
+        if (node.attrs.values && blueprint) {
+          const setType = node.attrs.values.type;
+          if (setType) {
+            const defaults = buildItemDefaults(blueprint, setType);
+            if (Object.keys(defaults).length) {
+              result.attrs = {
+                ...result.attrs,
+                values: { ...defaults, ...node.attrs.values },
+              };
+            }
+          }
+        }
+        return [result];
+      }
+
+      // Recurse into content — extract any inline image nodes and promote to block-level bard sets
+      if (Array.isArray(node.content)) {
+        const imageSets = [];
+        result.content = node.content
+          .filter((n) => n != null && typeof n === 'object')
+          .filter((inline) => {
+            if (inline.type === 'image') {
+              imageSets.push(inlineImageToBardSet(inline.attrs?.src));
+              return false;
+            }
+            return true;
+          })
+          .map((inline) => {
+            if (inline.type !== 'text') return inline;
+            const fixed = { ...inline };
+            if (fixed.value !== undefined && fixed.text === undefined) {
+              fixed.text = fixed.value;
+              delete fixed.value;
+            }
+            if (typeof fixed.text !== 'string') fixed.text = '';
+            return fixed;
+          });
+        // If paragraph became empty after extracting images, drop it and return just the sets
+        if (result.content.length === 0 && imageSets.length > 0) return imageSets;
+        return [result, ...imageSets];
+      }
+
+      return [result];
+    });
+}
+
+function injectReplicatorItemIds(arr) {
+  return arr.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+    const patched = { ...item };
+    if (!patched._id) patched._id = uid();
+    if (patched.enabled === undefined) patched.enabled = true;
+    return patched;
+  });
+}
+
+function getSetFieldTypes(blueprint, type, parentType) {
   if (!blueprint || !type) return {};
 
-  function findSetFields(node) {
-    if (!node || typeof node !== 'object') return null;
-    if (Array.isArray(node)) {
-      for (const item of node) {
-        const found = findSetFields(item);
-        if (found) return found;
-      }
-      return null;
+  // Collect all set-type nodes matching `type`, tracking their immediate set-type ancestor.
+  // When multiple set types share the same handle (e.g. a section type and a tile type both
+  // named "text"), parentType disambiguates which one is relevant.
+  const candidates = [];
+  function findFields(node, ancestorSetHandle) {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach((item) => findFields(item, ancestorSetHandle)); return; }
+    if (typeof node.handle === 'string' && node.type == null && Array.isArray(node.fields) && node.fields.length > 0) {
+      if (node.handle === type) candidates.push({ fields: node.fields, ancestor: ancestorSetHandle });
+      node.fields.forEach((f) => findFields(f, node.handle));
+      return;
     }
-    if (typeof node.handle === 'string' && node.handle === type && Array.isArray(node.fields)) {
-      return node.fields;
-    }
-    for (const value of Object.values(node)) {
-      const found = findSetFields(value);
-      if (found) return found;
-    }
-    return null;
+    Object.values(node).forEach((v) => findFields(v, ancestorSetHandle));
   }
+  findFields(blueprint, null);
 
-  const fields = findSetFields(blueprint);
-  if (!fields) return {};
+  if (!candidates.length) return {};
+  const best = parentType
+    ? (candidates.find((c) => c.ancestor === parentType) ?? candidates[0])
+    : (candidates.find((c) => c.ancestor === null) ?? candidates[0]);
+  const config = {};
+  for (const field of best.fields) {
+    if (field.handle) config[field.handle] = field.type ?? field.component ?? '';
+  }
+  return config;
+}
+
+function buildItemDefaults(blueprint, type, parentType) {
+  if (!blueprint || !type) return {};
+
+  const candidates = [];
+  function findSetFields(node, ancestorSetHandle) {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach((item) => findSetFields(item, ancestorSetHandle)); return; }
+    if (typeof node.handle === 'string' && node.type == null && Array.isArray(node.fields) && node.fields.length > 0) {
+      if (node.handle === type) candidates.push({ fields: node.fields, ancestor: ancestorSetHandle });
+      node.fields.forEach((f) => findSetFields(f, node.handle));
+      return;
+    }
+    Object.values(node).forEach((v) => findSetFields(v, ancestorSetHandle));
+  }
+  findSetFields(blueprint, null);
+
+  if (!candidates.length) return {};
+  const best = parentType
+    ? (candidates.find((c) => c.ancestor === parentType) ?? candidates[0])
+    : (candidates.find((c) => c.ancestor === null) ?? candidates[0]);
 
   const defaults = {};
   const ARRAY_TYPES = new Set(['replicator', 'grid', 'bard', 'checkboxes', 'list', 'tags', 'assets']);
-  for (const field of fields) {
+  for (const field of best.fields) {
     if (!field.handle) continue;
     const fieldType = field.type ?? field.component ?? '';
     if (ARRAY_TYPES.has(fieldType)) {
@@ -153,7 +338,7 @@ const AI_TOOLS = [
   },
   {
     name: 'get_blueprint',
-    description: 'Get the page blueprint — all available item types and their fields.',
+    description: 'Get the page blueprint — all available item types and their fields. Each entry may include _parent_set indicating which section type this item type belongs to (e.g. tile types with _parent_set:"tiles" are only valid inside "tiles" sections). Always respect _parent_set when choosing a type for add_item.',
     input_schema: { type: 'object', properties: {} },
   },
   {
@@ -253,7 +438,7 @@ async function executeTool(name, input) {
   if (name === 'get_blueprint') {
     const blueprint = getPublishStore(window.Statamic)?.blueprint;
     if (!blueprint) return { error: 'Blueprint not found' };
-    return simplifyBlueprintNode(blueprint) ?? {};
+    return extractBlueprintSets(blueprint);
   }
 
   if (name === 'search_assets') {
@@ -263,10 +448,14 @@ async function executeTool(name, input) {
   if (name === 'update_item') {
     const values = getPublishStore(window.Statamic)?.values;
     if (!values) return { error: 'Publish store not found' };
+    const blueprint = getPublishStore(window.Statamic)?.blueprint;
+    const normalizedFields = Object.fromEntries(
+      Object.entries(input.fields).map(([k, v]) => [k, sanitizeBardContent(v, blueprint)]),
+    );
     for (const [rootHandle, rootValue] of Object.entries(values)) {
       if (!Array.isArray(rootValue)) continue;
       const cloned = cloneValue(rootValue);
-      const type = patchItemInArray(cloned, input.id, input.fields);
+      const type = patchItemInArray(cloned, input.id, normalizedFields);
       if (type !== false) {
         pushUndoSnapshot();
         commitField(window.Statamic, rootHandle, cloned);
@@ -281,25 +470,76 @@ async function executeTool(name, input) {
     if (!values) return { error: 'Publish store not found' };
     const { parent, type, field, after_id, fields = {} } = input;
     const blueprint = getPublishStore(window.Statamic)?.blueprint;
-    const defaults = buildItemDefaults(blueprint, type);
-    const newItem = { _id: uid(), type, enabled: true, ...defaults, ...fields };
+    // Pre-scan: if parent is a nested item _id (not a top-level field), find its type so
+    // buildItemDefaults picks the correct set definition when handles collide across levels
+    // (e.g. section type "text" and tile type "text" both have handle "text").
+    const isTopLevel = typeof parent === 'string' && parent in values;
+    let nestedParentType;
+    if (!isTopLevel) {
+      for (const rootValue of Object.values(values)) {
+        if (!Array.isArray(rootValue)) continue;
+        const parentFound = findItemWithParent(cloneValue(rootValue), parent);
+        if (parentFound) { nestedParentType = parentFound.item?.type; break; }
+      }
+    }
+    const defaults = buildItemDefaults(blueprint, type, nestedParentType);
+    const fieldTypes = getSetFieldTypes(blueprint, type, nestedParentType);
+    const REPLICATOR_FIELD_TYPES = new Set(['replicator', 'grid']);
+    // Bard fields are stripped — Statamic must initialize new items before bard content
+    // can be set. Use update_item after creation to populate bard fields.
+    // Replicator/grid arrays get _id+enabled injected into sub-items.
+    const skippedBard = [];
+    const sanitizedFields = Object.fromEntries(
+      Object.entries(fields).filter(([k, v]) => {
+        if (fieldTypes[k] === 'bard' && Array.isArray(v)) { skippedBard.push(k); return false; }
+        return true;
+      }).map(([k, v]) =>
+        Array.isArray(v) && REPLICATOR_FIELD_TYPES.has(fieldTypes[k])
+          ? [k, injectReplicatorItemIds(v)]
+          : [k, v],
+      ),
+    );
+    const newItem = { _id: uid(), type, enabled: true, ...defaults, ...sanitizedFields };
 
-    if (typeof parent === 'string' && parent in values) {
+    if (isTopLevel) {
       const cloned = cloneValue(Array.isArray(values[parent]) ? values[parent] : []);
       insertAfterIdOrAppend(cloned, newItem, after_id);
       pushUndoSnapshot();
       commitField(window.Statamic, parent, cloned);
-      return { ok: true, id: newItem._id };
+      return skippedBard.length
+        ? { ok: true, id: newItem._id, set_bard_fields: skippedBard }
+        : { ok: true, id: newItem._id };
     }
 
     if (!field) return { error: 'field is required when parent is an item _id' };
     for (const [rootHandle, rootValue] of Object.entries(values)) {
       if (!Array.isArray(rootValue)) continue;
       const cloned = cloneValue(rootValue);
+      const parentFound = findItemWithParent(cloned, parent);
+      if (parentFound) {
+        const parentType = parentFound.item?.type;
+        if (parentType && blueprint) {
+          const allSets = extractBlueprintSets(blueprint);
+          const requestedSet = allSets[type];
+          if (requestedSet?._parent_set && requestedSet._parent_set !== parentType) {
+            const validTypes = Object.values(allSets)
+              .filter((s) => s._parent_set === parentType)
+              .map((s) => s.handle)
+              .join(', ');
+            return {
+              error: `Type "${type}" is only valid inside "${requestedSet._parent_set}" sections. Parent "${parent}" is type "${parentType}". Valid types for "${parentType}": [${validTypes || 'see get_blueprint'}]`,
+            };
+          }
+        }
+      }
       if (addToParentItem(cloned, parent, field, newItem, after_id)) {
+        // Inject meta for the new item before committing values so Vue renders it correctly.
+        injectNestedItemMeta(window.Statamic, rootHandle, parent, field, newItem._id, type);
         pushUndoSnapshot();
         commitField(window.Statamic, rootHandle, cloned);
-        return { ok: true, id: newItem._id };
+        return skippedBard.length
+          ? { ok: true, id: newItem._id, set_bard_fields: skippedBard }
+          : { ok: true, id: newItem._id };
       }
     }
     return { error: `Parent "${parent}" not found` };
@@ -388,7 +628,9 @@ async function sendToClaude(allMessages, systemPrompt, tools) {
   });
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
+    const errBody = await response.json().catch(() => null);
+    const detail = errBody?.error?.message ?? errBody?.message ?? '';
+    throw new Error(`HTTP ${response.status}${detail ? ': ' + detail : ''}`);
   }
 
   return response.json();
@@ -459,8 +701,8 @@ BRIEF: The brief is rebuilt after every write operation and always reflects curr
 HIERARCHY: The word "section" always means a top-level entry in the sections array. Items nested inside a section (tiles, accordion items, quotes within a tiles set, etc.) are sub-items of that section — not sections themselves. When looking for a section by type, only consider top-level entries.
 READING: The brief contains every item's _id, type, and key content. Do NOT call get_item before delete, move, or update_item — derive the _id from the brief. Only call get_item when you need full raw data not in the brief (e.g. complete ProseMirror nodes of a bard field you intend to edit).
 UPDATING: update_item patches any item at any depth by _id. To update a tile, accordion item, or any nested item, use its own _id directly — no need to reconstruct the parent array.
-ADDING: add_item takes parent + type. Use the root field handle as parent for top-level items (the top-level keys visible in the brief, e.g. "sections", "header"). For nested items (e.g. a tile inside a section) use the parent item's _id as parent and set field to the replicator field name (e.g. "tiles").
-BARD FIELDS use ProseMirror JSON. Always call get_field (for scalar top-level fields) or get_item (for bard fields inside any item) first, then make targeted changes to the returned structure. Never construct bard values from scratch. Key rules: text leaf nodes are {"type":"text","text":"..."} (not "value"); paragraphs are {"type":"paragraph","content":[...]}; bard set nodes are {"type":"set","attrs":{"id":"...","values":{...}}} where values contains the actual set fields.
+ADDING: add_item takes parent + type. Use the root field handle as parent for top-level items (the top-level keys visible in the brief, e.g. "sections", "header"). For nested items (e.g. a tile inside a section) use the parent item's _id as parent and set field to the replicator field name (e.g. "tiles"). The optional fields parameter is for scalar values (text, numbers, asset strings). If you pre-populate a nested replicator array via fields (e.g. fields.icons), every sub-item in that array MUST include "type" (the set handle from the blueprint) — _id and enabled are injected automatically.
+BARD FIELDS use ProseMirror JSON. Bard fields cannot be set during add_item — they are always initialized empty. If you pass bard content in add_item fields, the response will include "set_bard_fields" listing the skipped fields; immediately follow up with update_item calls (in parallel) to set those fields. For existing items, always call get_item first to read the current structure before editing. ProseMirror rules: text leaf nodes are {"type":"text","text":"..."} (never "value"); paragraphs are {"type":"paragraph","content":[{"type":"text","text":"..."}]}; headings are {"type":"heading","attrs":{"level":2,"textAlign":"left"},"content":[...]}; bard set nodes use {"type":"set","attrs":{"id":"...","values":{...}}} where values holds the set fields. IMAGES in bard: never use {"type":"image",...} inline nodes — that TipTap extension is not active. Embed images as bard sets: {"type":"set","attrs":{"id":"...","values":{"type":"image","enabled":true,"image":["assets::path/to/file.jpg"]}}}.
 ASSET FIELDS store values as "assets::path/to/file.jpg" strings (with the assets:: prefix). Always include this prefix when setting an asset field.
 When passing a complex object or array as a tool argument value, pass it as a native JSON value — never as a JSON string.`;
 
@@ -499,6 +741,11 @@ export function createChatSection(getBrief) {
   chatLabel.style.textTransform = 'uppercase';
   chatLabel.style.letterSpacing = '0.05em';
 
+  const headerButtons = document.createElement('div');
+  headerButtons.style.display = 'flex';
+  headerButtons.style.gap = '8px';
+  headerButtons.style.alignItems = 'center';
+
   const techToggle = document.createElement('button');
   techToggle.type = 'button';
   techToggle.textContent = 'hide technical';
@@ -515,8 +762,29 @@ export function createChatSection(getBrief) {
     setTechnicalVisibility(history, showTechnical);
   });
 
+  const clearBtn = document.createElement('button');
+  clearBtn.type = 'button';
+  clearBtn.textContent = 'clear chat';
+  clearBtn.style.fontSize = '10px';
+  clearBtn.style.background = 'none';
+  clearBtn.style.border = 'none';
+  clearBtn.style.cursor = 'pointer';
+  clearBtn.style.color = 'rgba(0,0,0,0.35)';
+  clearBtn.style.padding = '0';
+
+  clearBtn.addEventListener('click', () => {
+    messages = [];
+    totalInputTokens = 0;
+    totalOutputTokens = 0;
+    history.innerHTML = '';
+    updateTokenDisplay(tokenInfo);
+  });
+
+  headerButtons.appendChild(techToggle);
+  headerButtons.appendChild(clearBtn);
+
   headerRow.appendChild(chatLabel);
-  headerRow.appendChild(techToggle);
+  headerRow.appendChild(headerButtons);
 
   const history = document.createElement('div');
   history.style.maxHeight = '180px';
@@ -596,10 +864,18 @@ export function createChatSection(getBrief) {
           break;
         }
 
-        // Append assistant message with tool_use blocks
-        messages.push({ role: 'assistant', content: data.content });
+        // Normalize tool_use inputs: Anthropic may send input:[] for empty-input tools,
+        // but resending [] (array) where {} (object) is expected causes a 400 on next round.
+        const normalizedContent = data.content.map((b) =>
+          b.type === 'tool_use' && Array.isArray(b.input) && b.input.length === 0
+            ? { ...b, input: {} }
+            : b,
+        );
 
-        const toolUseBlocks = data.content.filter((b) => b.type === 'tool_use');
+        // Append assistant message with tool_use blocks
+        messages.push({ role: 'assistant', content: normalizedContent });
+
+        const toolUseBlocks = normalizedContent.filter((b) => b.type === 'tool_use');
 
         // Stuck loop detection
         if (toolUseBlocks.length === 1) {
