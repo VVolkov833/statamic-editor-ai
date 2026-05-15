@@ -817,6 +817,90 @@ When passing a complex object or array as a tool argument value, pass it as a na
   return blocks;
 }
 
+function mountBardEditor(container) {
+  const BardComp = window.Vue?.component?.('bard-fieldtype');
+  if (!BardComp) return null;
+
+  if (!document.getElementById('st-bard-doc-style')) {
+    const s = document.createElement('style');
+    s.id = 'st-bard-doc-style';
+    s.textContent = '.st-doc-bard .bard-editor .ProseMirror{min-height:80px;max-height:160px;overflow-y:auto;padding:6px 8px;outline:none}.st-doc-bard .bard-fieldtype-wrapper{border:1px solid rgba(0,0,0,0.15);border-radius:4px}.st-doc-bard .bard-content ul{list-style-type:disc;padding-left:1.5em;margin:.3em 0}.st-doc-bard .bard-content ol{list-style-type:decimal;padding-left:1.5em;margin:.3em 0}.st-doc-bard .bard-content li{margin:.1em 0}.st-doc-bard .bard-content blockquote{border-left:3px solid rgba(0,0,0,0.25);padding-left:.75em;margin:.3em 0;color:rgba(0,0,0,0.6);font-style:italic}.st-doc-bard .bard-content table{border-collapse:collapse;width:100%;margin:.5em 0}.st-doc-bard .bard-content td,.st-doc-bard .bard-content th{border:1px solid rgba(0,0,0,0.2);padding:4px 8px;min-width:2em}.st-doc-bard .bard-content th{background:rgba(0,0,0,0.04);font-weight:600}.st-doc-portals .popover{z-index:100}.st-doc-portals .stack{z-index:100}.st-doc-bard .bard-content a{color:#43a9ff;text-decoration:underline}';
+    document.head.appendChild(s);
+  }
+  container.classList.add('st-doc-bard');
+
+  let vm;
+  try {
+    const mountEl = document.createElement('div');
+    container.appendChild(mountEl);
+    vm = new window.Vue({
+      store: window.Statamic?.$store,
+      provide() { return { storeName: null }; },
+      render(h) {
+        return h(BardComp, {
+          props: {
+            value: this.bardValue,
+            config: this.bardConfig,
+            handle: 'document_content',
+            meta: this.bardMeta,
+          },
+          on: {
+            input: (v) => { this.bardValue = v; },
+            'meta-updated': (m) => { this.bardMeta = { ...this.bardMeta, ...m }; },
+          },
+        });
+      },
+      data() {
+        return {
+          portals: [],
+          bardValue: [],
+          bardConfig: {
+            sets: null,
+            buttons: ['h1', 'h2', 'h3', 'h4', 'bold', 'italic', 'underline', 'alignleft', 'aligncenter', 'alignright', 'unorderedlist', 'orderedlist', 'quote', 'anchor', 'table', 'removeformat'],
+            toolbar_mode: 'fixed',
+            allow_source: false,
+            fullscreen: false,
+            smart_typography: false,
+            enable_input_rules: true,
+            enable_paste_rules: true,
+          },
+          bardMeta: {
+            collapsed: [],
+            previews: {},
+            linkData: {},
+            defaults: {},
+            new: {},
+            existing: {},
+          },
+        };
+      },
+    }).$mount(mountEl);
+
+    // Portal targets must live at body level so fixed-position popovers are
+    // not clipped by any stacking context inside the panel.
+    const ptEl = document.createElement('div');
+    document.body.appendChild(ptEl);
+    new window.Vue({
+      parent: vm,
+      render(h) {
+        return h('div', { class: 'portal-targets st-doc-portals' },
+          this.$root.portals.map(p => h('portal-target', { key: p.id, props: { name: p.id } }))
+        );
+      },
+    }).$mount(ptEl);
+  } catch (err) {
+    console.error('Failed to mount Bard editor:', err);
+    return null;
+  }
+
+  const getBardInst = () => vm.$children[0];
+  return {
+    getHTML() { return getBardInst()?.editor?.getHTML?.() ?? ''; },
+    setContent(html) { getBardInst()?.editor?.commands?.setContent?.(html, false); },
+    clear() { getBardInst()?.editor?.commands?.setContent?.('', false); },
+  };
+}
+
 export function createChatSection(getBrief) {
   let showTechnical = true;
 
@@ -828,7 +912,7 @@ export function createChatSection(getBrief) {
   section.style.borderBottom = '1px solid rgba(0,0,0,0.1)';
 
   let currentTab = 'chat';
-  let documentHtml = '';
+  let bardEditor = null;
 
   function htmlToMarkdown(html) {
     const temp = document.createElement('div');
@@ -848,9 +932,14 @@ export function createChatSection(getBrief) {
       if (tag === 'ul' || tag === 'ol') return `${kids}\n`;
       if (tag === 'b' || tag === 'strong') return `**${kids}**`;
       if (tag === 'i' || tag === 'em') return `_${kids}_`;
+      if (tag === 's' || tag === 'del' || tag === 'strike') return `~~${kids}~~`;
+      if (tag === 'u') return kids;
+      if (tag === 'code') return `\`${kids}\``;
+      if (tag === 'blockquote') return `> ${kids.trim().replace(/\n/g, '\n> ')}\n\n`;
+      if (tag === 'a') { const href = node.getAttribute('href'); return href ? `[${kids}](${href})` : kids; }
       if (tag === 'td' || tag === 'th') return `${kids.trim()} | `;
       if (tag === 'tr') return `${kids.trim()}\n`;
-      if (['div', 'section', 'article', 'blockquote', 'figure'].includes(tag)) return `${kids}\n`;
+      if (['div', 'section', 'article', 'figure'].includes(tag)) return `${kids}\n`;
       return kids;
     }
     return traverse(temp).replace(/\n{3,}/g, '\n\n').trim();
@@ -993,40 +1082,12 @@ export function createChatSection(getBrief) {
   docDesc.style.color = 'rgba(0,0,0,0.45)';
   docDesc.style.lineHeight = '1.4';
 
-  const docArea = document.createElement('div');
-  docArea.contentEditable = 'true';
-  docArea.setAttribute('data-placeholder', 'Paste content here…');
-  docArea.style.minHeight = '80px';
-  docArea.style.maxHeight = '200px';
-  docArea.style.overflowY = 'auto';
-  docArea.style.fontSize = '12px';
-  docArea.style.padding = '6px 8px';
-  docArea.style.border = '1px solid rgba(0,0,0,0.2)';
-  docArea.style.borderRadius = '4px';
-  docArea.style.lineHeight = '1.5';
-  docArea.style.outline = 'none';
-  docArea.style.cursor = 'text';
+  const docEditorContainer = document.createElement('div');
 
-  const phStyle = document.createElement('style');
-  phStyle.textContent = '[data-placeholder]:empty::before{content:attr(data-placeholder);color:rgba(0,0,0,0.3);pointer-events:none}';
-  document.head.appendChild(phStyle);
-
-  docArea.addEventListener('paste', (e) => {
-    e.preventDefault();
-    const html = e.clipboardData.getData('text/html');
-    const text = e.clipboardData.getData('text/plain');
-    if (html) {
-      docArea.innerHTML = html;
-      documentHtml = html;
-    } else {
-      docArea.textContent = text;
-      documentHtml = '';
-    }
-  });
-
-  docArea.addEventListener('input', () => {
-    documentHtml = docArea.innerHTML;
-  });
+  function ensureBardEditor() {
+    if (bardEditor) return;
+    bardEditor = mountBardEditor(docEditorContainer);
+  }
 
   const docBtnRow = document.createElement('div');
   docBtnRow.style.display = 'flex';
@@ -1044,7 +1105,7 @@ export function createChatSection(getBrief) {
   clearDocBtn.style.cursor = 'pointer';
   clearDocBtn.style.padding = '3px 10px';
   clearDocBtn.style.color = 'rgba(0,0,0,0.5)';
-  clearDocBtn.addEventListener('click', () => { docArea.innerHTML = ''; documentHtml = ''; });
+  clearDocBtn.addEventListener('click', () => { bardEditor?.clear(); });
 
   // .docx upload — hidden file input + visible label button, revealed after mammoth loads
   const docxInput = document.createElement('input');
@@ -1072,10 +1133,10 @@ export function createChatSection(getBrief) {
     try {
       const arrayBuffer = await file.arrayBuffer();
       const { value: html } = await window.mammoth.convertToHtml({ arrayBuffer });
-      docArea.innerHTML = html;
-      documentHtml = html;
+      bardEditor?.setContent(html);
     } catch (err) {
-      docArea.textContent = 'Failed to read file: ' + err.message;
+      uploadBtn.textContent = 'read error';
+      setTimeout(() => { uploadBtn.textContent = 'Upload .docx'; }, 2000);
     } finally {
       uploadBtn.textContent = 'Upload .docx';
       uploadBtn.disabled = false;
@@ -1093,9 +1154,8 @@ export function createChatSection(getBrief) {
   buildBtn.style.padding = '3px 12px';
 
   buildBtn.addEventListener('click', () => {
-    const raw = documentHtml || docArea.innerText;
-    if (!raw.trim()) return;
-    const md = documentHtml ? htmlToMarkdown(documentHtml) : raw.trim();
+    const html = bardEditor?.getHTML() ?? '';
+    const md = htmlToMarkdown(html);
     if (!md.trim()) return;
     const prompt = `Rebuild this page's sections based on the document below. Use the blueprint to choose appropriate section types and fill in the content. Replace or add sections as needed.\n\n---\n\n${md}`;
     switchTab('chat');
@@ -1107,7 +1167,7 @@ export function createChatSection(getBrief) {
   docBtnRow.appendChild(uploadBtn);
   docBtnRow.appendChild(buildBtn);
   documentView.appendChild(docDesc);
-  documentView.appendChild(docArea);
+  documentView.appendChild(docEditorContainer);
   documentView.appendChild(docBtnRow);
 
   let mammothLoading = false;
@@ -1136,7 +1196,7 @@ export function createChatSection(getBrief) {
     chatView.style.display = tab === 'chat' ? 'flex' : 'none';
     documentView.style.display = tab === 'document' ? 'flex' : 'none';
     headerButtons.style.visibility = tab === 'chat' ? 'visible' : 'hidden';
-    if (tab === 'document') loadMammoth();
+    if (tab === 'document') { ensureBardEditor(); loadMammoth(); }
   }
 
   chatTabBtn.addEventListener('click', () => switchTab('chat'));

@@ -134,7 +134,7 @@ function createFloatingPanel(actions, panelStorageKey) {
   const panel = document.createElement('div');
   panel.id = PANEL_ID;
   panel.style.position = 'fixed';
-  panel.style.zIndex = '2000';
+  panel.style.zIndex = '4';
   panel.style.background = 'var(--bg, #fff)';
   panel.style.border = '1px solid rgba(0, 0, 0, 0.12)';
   panel.style.borderRadius = '10px';
