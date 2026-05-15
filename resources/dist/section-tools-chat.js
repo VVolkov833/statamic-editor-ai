@@ -1,4 +1,4 @@
-import { getPublishStore, getSections, setSections, assignFreshSectionIdentity, uid, getPublishModulesWithSections, cloneValue, commitField } from './section-tools-lib.js';
+import { getPublishStore, uid, getPublishModuleNames, cloneValue, commitField } from './section-tools-lib.js';
 import { simplifyBlueprintNode, fetchAssetsForAI, extractBlueprintSets } from './section-tools-queries.js';
 import { pushUndoSnapshot } from './section-tools-mutations.js';
 
@@ -36,7 +36,7 @@ function injectNestedItemMeta(statamic, rootHandle, parentId, field, newItemId, 
     },
   };
 
-  const moduleNames = getPublishModulesWithSections(statamic);
+  const moduleNames = getPublishModuleNames(statamic);
   for (const moduleName of moduleNames) {
     try {
       statamic.$store.commit(`publish/${moduleName}/setMeta`, updatedMeta);
@@ -592,7 +592,7 @@ async function executeTool(name, input) {
     if (typeof value === 'string') {
       try { value = JSON.parse(value); } catch {}
     }
-    const moduleNames = getPublishModulesWithSections(window.Statamic);
+    const moduleNames = getPublishModuleNames(window.Statamic);
     if (!moduleNames.length) return { error: 'Publish store not found' };
     let applied = false;
     for (const moduleName of moduleNames) {
@@ -791,19 +791,20 @@ function buildSystemPrompt(getBrief) {
   const brief = getBrief?.();
   const briefJson = brief ? JSON.stringify(brief, null, 2) : null;
 
-  const staticText = `You are an AI assistant helping a web editor manage page content in a Statamic CMS.
+  const staticText = `You are an AI assistant helping a web editor manage content in a Statamic CMS.
 The site is for a plastic surgery clinic in Frankfurt, Germany.
-You help with content suggestions, copywriting, and page structure advice.
+You help with content suggestions, copywriting, and structure advice for any entry type — pages, blog posts, testimonials, or others.
 Respond concisely.
 When referring to sections to the user, use 1-based numbering (e.g. "section 1", "section 2"). Tool calls always use _id values — never positional indexes.
 ITEM IDs: Every item in the brief (sections, tiles, accordion items, etc.) has a unique _id. Always use these in tool calls. Never guess or construct an _id — if you cannot find the exact _id in the brief, stop and ask the user to clarify instead of proceeding. Write tool responses include a "type" field confirming what was affected — verify it matches your intention before continuing.
-BRIEF: The brief is rebuilt after every write operation and always reflects current page state. The current brief is the complete page structure — any item not listed in it does not exist on the page.
-HIERARCHY: The word "section" always means a top-level entry in the sections array. Items nested inside a section (tiles, accordion items, quotes within a tiles set, etc.) are sub-items of that section — not sections themselves. When looking for a section by type, only consider top-level entries.
+BRIEF: The brief is rebuilt after every write operation and always reflects current entry state. The current brief is the complete structure — any item not listed in it does not exist.
+HIERARCHY: The word "section" always means a top-level entry in the sections (or equivalent) array. Items nested inside a section (tiles, accordion items, etc.) are sub-items — not sections themselves. When looking for a section by type, only consider top-level entries.
 READING: The brief contains every item's _id, type, and key content. Do NOT call get_item before delete, move, or update_item — derive the _id from the brief. Only call get_item when you need full raw data not in the brief (e.g. complete ProseMirror nodes of a bard field you intend to edit).
-UPDATING: update_item patches any item at any depth by _id. To update a tile, accordion item, or any nested item, use its own _id directly — no need to reconstruct the parent array.
+UPDATING: update_item patches any item at any depth by _id. To update a tile, accordion item, or any nested item, use its own _id directly — no need to reconstruct the parent array. For top-level scalar fields (title, date, slug, etc.) use update_field.
 ADDING: add_item takes parent + type. Use the root field handle as parent for top-level items (the top-level keys visible in the brief, e.g. "sections", "header"). For nested items (e.g. a tile inside a section) use the parent item's _id as parent and set field to the replicator field name (e.g. "tiles"). The optional fields parameter is for scalar values (text, numbers, asset strings). If you pre-populate a nested replicator array via fields (e.g. fields.icons), every sub-item in that array MUST include "type" (the set handle from the blueprint) — _id and enabled are injected automatically.
 BARD FIELDS use ProseMirror JSON. Bard fields cannot be set during add_item — they are always initialized empty. If you pass bard content in add_item fields, the response will include "set_bard_fields" listing the skipped fields; immediately follow up with update_item calls (in parallel) to set those fields. For existing items, always call get_item first to read the current structure before editing. ProseMirror rules: text leaf nodes are {"type":"text","text":"..."} (never "value"); paragraphs are {"type":"paragraph","content":[{"type":"text","text":"..."}]}; headings are {"type":"heading","attrs":{"level":2,"textAlign":"left"},"content":[...]}; bard set nodes use {"type":"set","attrs":{"id":"...","values":{...}}} where values holds the set fields. IMAGES in bard: never use {"type":"image",...} inline nodes — that TipTap extension is not active. Embed images as bard sets: {"type":"set","attrs":{"id":"...","values":{"type":"image","enabled":true,"image":["assets::path/to/file.jpg"]}}}.
 ASSET FIELDS store values as "assets::path/to/file.jpg" strings (with the assets:: prefix). Always include this prefix when setting an asset field.
+EMPTY FIELDS: The brief omits fields that have no value. The "_fields" key lists all known field handles for this entry type, including empty ones. If a user refers to a field not shown in the brief but listed in "_fields", use update_field or get_field directly — do not say the field doesn't exist.
 When passing a complex object or array as a tool argument value, pass it as a native JSON value — never as a JSON string.`;
 
   const blocks = [

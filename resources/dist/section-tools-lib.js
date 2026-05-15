@@ -49,6 +49,16 @@ export function getPublishModulesWithSections(statamic) {
     .map(([moduleName]) => moduleName);
 }
 
+// Returns the modules to commit field changes to. Prefers modules found by
+// getPublishModulesWithSections; falls back to 'base' so non-sections entries
+// (blog posts, testimonials, etc.) still work.
+export function getPublishModuleNames(statamic) {
+  const bySections = getPublishModulesWithSections(statamic);
+  if (bySections.length > 0) return bySections;
+  const s = getStatamic(statamic);
+  return s?.$store?.state?.publish?.base ? ['base'] : [];
+}
+
 export function getPublishStore(statamic) {
   const s = getStatamic(statamic);
   const moduleNames = getPublishModulesWithSections(s);
@@ -186,7 +196,7 @@ export function commitField(statamic, handle, value) {
   if (handle === 'sections') return setSections(statamic, value);
 
   const s = statamic ?? window.Statamic;
-  const moduleNames = getPublishModulesWithSections(s);
+  const moduleNames = getPublishModuleNames(s);
   if (!moduleNames.length) return false;
 
   let applied = false;
@@ -668,6 +678,99 @@ function getMainTabFields(blueprint) {
   return fields;
 }
 
+function getSidebarFields(blueprint) {
+  // Use direct property access (same as getMainTabFields does for 'main') to avoid
+  // Object.values() enumeration issues with Vue 2 reactive objects.
+  const tab = blueprint?.tabs?.sidebar;
+  if (!tab || typeof tab !== 'object') return [];
+  const fields = [];
+  for (const section of (Array.isArray(tab.sections) ? tab.sections : [])) {
+    for (const field of (Array.isArray(section.fields) ? section.fields : [])) {
+      if (field?.handle) fields.push(field);
+    }
+  }
+  return fields;
+}
+
+// Statamic fieldtypes can push runtime data into publish.meta via PHP preload().
+// Some fieldtypes (e.g. select with dynamic options) store their options there.
+function getFieldSchemaFromMeta(publishStore) {
+  const meta = publishStore?.meta;
+  if (!meta || typeof meta !== 'object') return {};
+  const result = {};
+  try {
+    for (const [handle, data] of Object.entries(meta)) {
+      if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
+      const entry = {};
+      if (typeof data.type === 'string' && data.type) entry.type = data.type;
+      if (typeof data.display === 'string' && data.display) entry.display = data.display;
+      if (Array.isArray(data.options) && data.options.length > 0) entry.options = data.options;
+      if (Object.keys(entry).length > 0) result[handle] = entry;
+    }
+  } catch {
+    // Ignore reactive-object enumeration errors.
+  }
+  return result;
+}
+
+// Statamic renders fieldtype Vue components with a `config` prop containing type/display/options.
+// Walk [data-field-handle] wrappers and extract config from the nearest Vue instance.
+function getFieldSchemaFromDom() {
+  const result = {};
+  try {
+    const wrappers = document.querySelectorAll('[data-field-handle]');
+    for (const wrapper of wrappers) {
+      const handle = wrapper.dataset?.fieldHandle;
+      if (!handle) continue;
+      const config = findVueFieldConfig(wrapper);
+      if (!config) continue;
+      const entry = {};
+      if (typeof config.display === 'string' && config.display) entry.display = config.display;
+      if (typeof config.type === 'string' && config.type) entry.type = config.type;
+      if (Array.isArray(config.options) && config.options.length > 0) entry.options = config.options;
+      if (Object.keys(entry).length > 0) result[handle] = entry;
+    }
+  } catch {
+    // DOM walk is best-effort; ignore all errors.
+  }
+  return result;
+}
+
+function findVueFieldConfig(wrapper) {
+  // Check the wrapper element itself, then immediate children, then grandchildren.
+  // Statamic can mount the fieldtype component at any of these levels.
+  const levels = [
+    [wrapper],
+    Array.from(wrapper.children ?? []).slice(0, 6),
+    Array.from(wrapper.children ?? []).slice(0, 6).flatMap((c) => Array.from(c.children ?? []).slice(0, 6)),
+  ];
+  for (const elems of levels) {
+    for (const el of elems) {
+      const vm = el.__vue__;
+      if (!vm) continue;
+      const cfg = vm.$props?.config ?? vm.config;
+      if (cfg && typeof cfg === 'object' && typeof cfg.type === 'string' && cfg.type) return cfg;
+    }
+  }
+  return null;
+}
+
+function mergeSchemaSource(fieldsSchema, source, optionTypesSet) {
+  for (const [h, data] of Object.entries(source)) {
+    if (!data || typeof data !== 'object') continue;
+    if (!fieldsSchema[h]) {
+      fieldsSchema[h] = { ...data };
+    } else {
+      const existing = fieldsSchema[h];
+      if (!existing.display && data.display) existing.display = data.display;
+      if (!existing.type && data.type) existing.type = data.type;
+      if (!existing.options && data.options && optionTypesSet.has(existing.type ?? data.type)) {
+        existing.options = data.options;
+      }
+    }
+  }
+}
+
 export function buildSectionBrief(section, options = {}) {
   if (!section || typeof section !== 'object') return null;
   const s = options.statamic ?? window.Statamic;
@@ -696,8 +799,14 @@ export function buildPageBrief(values, options = {}) {
       : { ...(entry.config ?? {}) };
   }
 
-  // Blueprint fields first, then guarantee core content handles are always included
-  const CORE_HANDLES = ['title', 'header', 'sections'];
+  // Dynamically find all replicator-like fields in the current values (covers sections,
+  // sections-v2, header, or any other replicator regardless of field handle name).
+  const replicatorHandles = Object.keys(sourceValues).filter((h) => {
+    const v = sourceValues[h];
+    return Array.isArray(v) && v.some((item) => item && typeof item === 'object' && (item._id != null || item.id != null));
+  });
+  // 'slug' and 'date' live in the sidebar tab, not main — include them explicitly.
+  const CORE_HANDLES = ['title', 'slug', 'date', ...replicatorHandles];
   const seen = new Set();
   const handlesToProcess = [
     ...mainFields.map((e) => e?.handle).filter(Boolean),
@@ -718,6 +827,42 @@ export function buildPageBrief(values, options = {}) {
     if (value !== null && value !== undefined) {
       brief[handle] = value;
     }
+  }
+
+  // Build a schema map covering all editable fields (main tab + sidebar).
+  // Use mainFields (proven to work) + explicit sidebar access to avoid Object.values()
+  // enumeration issues with Vue 2 reactive Vuex objects.
+  // Merge entry + entry.field + entry.config to handle both flat and nested blueprint structures.
+  const sidebarFields = getSidebarFields(blueprint);
+  const schemaSource = [...mainFields, ...sidebarFields];
+  const fieldsSchema = {};
+  for (const entry of schemaSource) {
+    const h = entry?.handle;
+    if (!h) continue;
+    const fieldData = {
+      ...(entry ?? {}),
+      ...(typeof entry?.field === 'object' && entry.field ? entry.field : {}),
+      ...(entry?.config ?? {}),
+    };
+    const type = fieldData.type ?? fieldData.component ?? '';
+    const display = fieldData.display ?? '';
+    const meta = {};
+    if (display) meta.display = display;
+    if (type) meta.type = type;
+    if (fieldData.options && OPTION_TYPES.has(type)) meta.options = fieldData.options;
+    if (Object.keys(meta).length > 0) fieldsSchema[h] = meta;
+  }
+  if (!fieldsSchema.slug) fieldsSchema.slug = { type: 'slug' };
+  if (!fieldsSchema.date) fieldsSchema.date = { type: 'date' };
+
+  // Supplement with Vuex meta (runtime preloaded field data — works for dynamic option fields)
+  mergeSchemaSource(fieldsSchema, getFieldSchemaFromMeta(publishStore), OPTION_TYPES);
+
+  // Supplement with rendered field components in the DOM (config prop has type/display/options)
+  mergeSchemaSource(fieldsSchema, getFieldSchemaFromDom(), OPTION_TYPES);
+
+  if (Object.keys(fieldsSchema).length > 0) {
+    brief._fields = fieldsSchema;
   }
 
   return brief;

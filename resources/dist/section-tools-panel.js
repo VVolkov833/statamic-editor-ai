@@ -1,5 +1,5 @@
 import { createChatSection } from './section-tools-chat.js';
-import { buildPageBrief } from './section-tools-lib.js';
+import { buildPageBrief as defaultBuildPageBrief } from './section-tools-lib.js';
 
 const PANEL_ID = 'section-tools-floating-panel';
 const PANEL_HANDLE_ID = 'section-tools-floating-panel-handle';
@@ -130,7 +130,7 @@ function makePanelDraggable(panel, handle, panelStorageKey) {
   handle.addEventListener('pointercancel', finishDrag);
 }
 
-function createFloatingPanel(actions, panelStorageKey) {
+function createFloatingPanel(actions, panelStorageKey, getBrief) {
   const panel = document.createElement('div');
   panel.id = PANEL_ID;
   panel.style.position = 'fixed';
@@ -155,19 +155,19 @@ function createFloatingPanel(actions, panelStorageKey) {
   handle.style.color = 'var(--text, #111)';
 
   panel.appendChild(handle);
-  panel.appendChild(createChatSection(() => buildPageBrief()));
+  panel.appendChild(createChatSection(getBrief ?? (() => defaultBuildPageBrief())));
   panel.appendChild(createPanelGroup(actions));
   makePanelDraggable(panel, handle, panelStorageKey);
 
   return panel;
 }
 
-function mountFloatingPanel(isInScope, actions, panelStorageKey) {
+function mountFloatingPanel(isInScope, actions, panelStorageKey, getBrief) {
   if (!isInScope() || document.getElementById(PANEL_ID)) {
     return;
   }
 
-  const panel = createFloatingPanel(actions, panelStorageKey);
+  const panel = createFloatingPanel(actions, panelStorageKey, getBrief);
   document.body.appendChild(panel);
 
   const savedPosition = readPanelPosition(panelStorageKey);
@@ -191,9 +191,9 @@ function unmountFloatingPanelWhenOutOfScope(isInScope) {
 }
 
 export function syncSectionToolsUi(options) {
-  const { isInScope, actions, panelStorageKey } = options;
+  const { isInScope, actions, panelStorageKey, getBrief } = options;
 
-  mountFloatingPanel(isInScope, actions, panelStorageKey);
+  mountFloatingPanel(isInScope, actions, panelStorageKey, getBrief);
   unmountFloatingPanelWhenOutOfScope(isInScope);
 }
 

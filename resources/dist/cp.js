@@ -14,7 +14,7 @@ import {
   logAssetSearch,
 } from './section-tools-queries';
 import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tools-panel';
-import { getPublishStore as libGetPublishStore, getSections as libGetSections } from './section-tools-lib';
+import { getPublishStore as libGetPublishStore } from './section-tools-lib';
 
 (() => {
   const viteHost = window.location.hostname || '127.0.0.1';
@@ -62,11 +62,11 @@ import { getPublishStore as libGetPublishStore, getSections as libGetSections } 
   window.__sectionToolsLoaded = true;
   console.info('[SectionTools] cp.js loaded', window.location.pathname);
 
-  function isPagesEntryScreen() {
-    const isPagesCollectionRoute = window.location.pathname.includes('/collections/pages');
-    const hasSectionsInPublishState = Array.isArray(libGetPublishStore(window.Statamic)?.values?.sections);
-
-    return isPagesCollectionRoute && hasSectionsInPublishState;
+  function isEntryEditScreen() {
+    const isCollectionsRoute = window.location.pathname.includes('/collections/');
+    const store = libGetPublishStore(window.Statamic);
+    const hasValues = store?.values != null && typeof store.values === 'object';
+    return isCollectionsRoute && hasValues;
   }
 
   window.SectionTools = window.SectionTools ?? {};
@@ -77,7 +77,7 @@ import { getPublishStore as libGetPublishStore, getSections as libGetSections } 
 
   function syncButtons() {
     syncSectionToolsUi({
-      isInScope: isPagesEntryScreen,
+      isInScope: isEntryEditScreen,
       panelStorageKey,
       actions: {
         onQuote: insertQuoteAsSecondSection,
