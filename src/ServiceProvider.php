@@ -16,6 +16,11 @@ class ServiceProvider extends AddonServiceProvider
         // The host app loads the CP script through its Vite pipeline in local development.
 
         Statamic::pushCpRoutes(function () {
+            Route::get('section-tools/mammoth.js', function () {
+                $path = __DIR__ . '/../resources/dist/mammoth.browser.min.js';
+                return response()->file($path, ['Content-Type' => 'application/javascript']);
+            });
+
             Route::post('section-tools/ai/chat', function (Request $request) {
                 // Decode with json_decode(..., false) so JSON objects become stdClass,
                 // not PHP arrays. This preserves {} vs [] at every nesting depth when

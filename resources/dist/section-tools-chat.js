@@ -636,6 +636,105 @@ async function sendToClaude(allMessages, systemPrompt, tools) {
   return response.json();
 }
 
+function renderMarkdown(text) {
+  function esc(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function inline(s) {
+    return s
+      .replace(/`([^`\n]+)`/g, '<code style="background:rgba(0,0,0,0.07);padding:1px 4px;border-radius:2px;font-size:11px">$1</code>')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.+?)\*/g, '<em>$1</em>')
+      .replace(/~~(.+?)~~/g, '<del>$1</del>')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:#4f46e5;text-decoration:underline">$1</a>');
+  }
+
+  const lines = text.split('\n');
+  let html = '';
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Fenced code block
+    if (line.startsWith('```')) {
+      let code = '';
+      i++;
+      while (i < lines.length && !lines[i].startsWith('```')) { code += esc(lines[i]) + '\n'; i++; }
+      html += `<pre style="background:rgba(0,0,0,0.06);padding:6px 8px;border-radius:3px;overflow-x:auto;font-size:11px;margin:4px 0;white-space:pre"><code>${code.trimEnd()}</code></pre>`;
+      i++;
+      continue;
+    }
+
+    // Horizontal rule
+    if (/^(\s*[-*_]){3,}\s*$/.test(line) && line.trim().length >= 3) {
+      html += '<hr style="border:none;border-top:1px solid rgba(0,0,0,0.15);margin:6px 0">';
+      i++; continue;
+    }
+
+    // Heading — use real h tags so copy-paste preserves semantics
+    const hm = line.match(/^(#{1,6}) (.+)/);
+    if (hm) {
+      const level = hm[1].length;
+      const sz = ['15px','14px','13px','12px','12px','12px'][level - 1];
+      html += `<h${level} style="font-size:${sz};font-weight:700;margin:6px 0 2px;padding:0">${inline(esc(hm[2]))}</h${level}>`;
+      i++; continue;
+    }
+
+    // Blockquote (supports >> nesting)
+    if (line.startsWith('>')) {
+      let depth = 0, content = line;
+      while (content.startsWith('>')) { depth++; content = content.slice(1).replace(/^ /, ''); }
+      html += `<div style="border-left:3px solid rgba(0,0,0,0.2);padding-left:${depth * 10}px;margin:2px 0;color:rgba(0,0,0,0.55);font-style:italic">${inline(esc(content))}</div>`;
+      i++; continue;
+    }
+
+    // Table — collect consecutive pipe rows
+    if (line.startsWith('|')) {
+      const rows = [];
+      while (i < lines.length && lines[i].startsWith('|')) { rows.push(lines[i]); i++; }
+      const isSep = (r) => /^\|[\s\-:|]+\|$/.test(r.trim());
+      let tbl = '<table style="border-collapse:collapse;font-size:11px;margin:4px 0;width:100%">';
+      rows.forEach((row, ri) => {
+        if (isSep(row)) return;
+        const isHead = ri === 0 || (ri === 1 && !isSep(rows[0])) && rows.length > 1 && isSep(rows[1] ?? '');
+        const cells = row.split('|').slice(1, -1).map(c => c.trim());
+        tbl += '<tr>';
+        cells.forEach(cell => {
+          const tag = (ri === 0) ? 'th' : 'td';
+          const style = (ri === 0)
+            ? 'padding:3px 7px;border:1px solid rgba(0,0,0,0.15);font-weight:600;background:rgba(0,0,0,0.04);text-align:left'
+            : 'padding:3px 7px;border:1px solid rgba(0,0,0,0.12)';
+          tbl += `<${tag} style="${style}">${inline(esc(cell))}</${tag}>`;
+        });
+        tbl += '</tr>';
+      });
+      tbl += '</table>';
+      html += tbl;
+      continue;
+    }
+
+    // List item (- / * / 1.)
+    const lm = line.match(/^(\s*)([-*+]|\d+\.) (.+)/);
+    if (lm) {
+      const indent = Math.floor(lm[1].length / 2);
+      const bullet = /\d+\./.test(lm[2]) ? lm[2] : '•';
+      html += `<div style="padding-left:${12 + indent * 12}px;margin:1px 0">${bullet} ${inline(esc(lm[3]))}</div>`;
+      i++; continue;
+    }
+
+    // Empty line
+    if (line.trim() === '') { html += '<div style="height:5px"></div>'; i++; continue; }
+
+    // Regular line
+    html += `<div>${inline(esc(line))}</div>`;
+    i++;
+  }
+
+  return html;
+}
+
 function appendMessage(historyEl, role, text) {
   const msg = document.createElement('div');
   msg.style.marginBottom = '4px';
@@ -644,17 +743,18 @@ function appendMessage(historyEl, role, text) {
   msg.style.fontSize = '12px';
   msg.style.lineHeight = '1.5';
   msg.style.wordBreak = 'break-word';
-  msg.style.whiteSpace = 'pre-wrap';
 
   if (role === 'user') {
     msg.style.background = 'rgba(0,0,0,0.06)';
     msg.style.marginLeft = '16px';
+    msg.style.whiteSpace = 'pre-wrap';
+    msg.textContent = text;
   } else {
     msg.style.background = 'rgba(99,102,241,0.1)';
     msg.style.marginRight = '16px';
+    msg.innerHTML = renderMarkdown(text);
   }
 
-  msg.textContent = text;
   historyEl.appendChild(msg);
   historyEl.scrollTop = historyEl.scrollHeight;
   return msg;
@@ -727,19 +827,66 @@ export function createChatSection(getBrief) {
   section.style.paddingBottom = '8px';
   section.style.borderBottom = '1px solid rgba(0,0,0,0.1)';
 
-  // Header row: label + show/hide toggle
+  let currentTab = 'chat';
+  let documentHtml = '';
+
+  function htmlToMarkdown(html) {
+    const temp = document.createElement('div');
+    temp.innerHTML = html;
+    function traverse(node) {
+      if (node.nodeType === 3) return node.textContent;
+      if (node.nodeType !== 1) return '';
+      const tag = node.tagName.toLowerCase();
+      const kids = Array.from(node.childNodes).map(traverse).join('');
+      if (tag === 'br') return '\n';
+      if (tag === 'h1') return `# ${kids.trim()}\n\n`;
+      if (tag === 'h2') return `## ${kids.trim()}\n\n`;
+      if (tag === 'h3') return `### ${kids.trim()}\n\n`;
+      if (['h4', 'h5', 'h6'].includes(tag)) return `#### ${kids.trim()}\n\n`;
+      if (tag === 'p') return `${kids.trim()}\n\n`;
+      if (tag === 'li') return `- ${kids.trim()}\n`;
+      if (tag === 'ul' || tag === 'ol') return `${kids}\n`;
+      if (tag === 'b' || tag === 'strong') return `**${kids}**`;
+      if (tag === 'i' || tag === 'em') return `_${kids}_`;
+      if (tag === 'td' || tag === 'th') return `${kids.trim()} | `;
+      if (tag === 'tr') return `${kids.trim()}\n`;
+      if (['div', 'section', 'article', 'blockquote', 'figure'].includes(tag)) return `${kids}\n`;
+      return kids;
+    }
+    return traverse(temp).replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  // Header row: tabs + action buttons
   const headerRow = document.createElement('div');
   headerRow.style.display = 'flex';
   headerRow.style.justifyContent = 'space-between';
   headerRow.style.alignItems = 'center';
 
-  const chatLabel = document.createElement('span');
-  chatLabel.textContent = 'Chat';
-  chatLabel.style.fontSize = '10px';
-  chatLabel.style.fontWeight = '600';
-  chatLabel.style.color = 'rgba(0,0,0,0.4)';
-  chatLabel.style.textTransform = 'uppercase';
-  chatLabel.style.letterSpacing = '0.05em';
+  const tabBar = document.createElement('div');
+  tabBar.style.display = 'flex';
+  tabBar.style.gap = '10px';
+  tabBar.style.alignItems = 'center';
+
+  function makeTabBtn(label, active) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = label;
+    btn.style.fontSize = '10px';
+    btn.style.textTransform = 'uppercase';
+    btn.style.letterSpacing = '0.05em';
+    btn.style.background = 'none';
+    btn.style.border = 'none';
+    btn.style.cursor = 'pointer';
+    btn.style.padding = '0';
+    btn.style.fontWeight = active ? '600' : '400';
+    btn.style.color = active ? 'rgba(0,0,0,0.7)' : 'rgba(0,0,0,0.35)';
+    return btn;
+  }
+
+  const chatTabBtn = makeTabBtn('Chat', true);
+  const docTabBtn = makeTabBtn('Document', false);
+  tabBar.appendChild(chatTabBtn);
+  tabBar.appendChild(docTabBtn);
 
   const headerButtons = document.createElement('div');
   headerButtons.style.display = 'flex';
@@ -782,9 +929,14 @@ export function createChatSection(getBrief) {
 
   headerButtons.appendChild(techToggle);
   headerButtons.appendChild(clearBtn);
-
-  headerRow.appendChild(chatLabel);
+  headerRow.appendChild(tabBar);
   headerRow.appendChild(headerButtons);
+
+  // Chat view
+  const chatView = document.createElement('div');
+  chatView.style.display = 'flex';
+  chatView.style.flexDirection = 'column';
+  chatView.style.gap = '5px';
 
   const history = document.createElement('div');
   history.style.maxHeight = '180px';
@@ -825,23 +977,195 @@ export function createChatSection(getBrief) {
 
   inputRow.appendChild(textarea);
   inputRow.appendChild(sendBtn);
+  chatView.appendChild(history);
+  chatView.appendChild(inputRow);
+  chatView.appendChild(tokenInfo);
+
+  // Document view
+  const documentView = document.createElement('div');
+  documentView.style.display = 'none';
+  documentView.style.flexDirection = 'column';
+  documentView.style.gap = '5px';
+
+  const docDesc = document.createElement('div');
+  docDesc.textContent = 'Paste your document here, or upload a .docx file. Click "Build" to let the AI restructure the page.';
+  docDesc.style.fontSize = '11px';
+  docDesc.style.color = 'rgba(0,0,0,0.45)';
+  docDesc.style.lineHeight = '1.4';
+
+  const docArea = document.createElement('div');
+  docArea.contentEditable = 'true';
+  docArea.setAttribute('data-placeholder', 'Paste content here…');
+  docArea.style.minHeight = '80px';
+  docArea.style.maxHeight = '200px';
+  docArea.style.overflowY = 'auto';
+  docArea.style.fontSize = '12px';
+  docArea.style.padding = '6px 8px';
+  docArea.style.border = '1px solid rgba(0,0,0,0.2)';
+  docArea.style.borderRadius = '4px';
+  docArea.style.lineHeight = '1.5';
+  docArea.style.outline = 'none';
+  docArea.style.cursor = 'text';
+
+  const phStyle = document.createElement('style');
+  phStyle.textContent = '[data-placeholder]:empty::before{content:attr(data-placeholder);color:rgba(0,0,0,0.3);pointer-events:none}';
+  document.head.appendChild(phStyle);
+
+  docArea.addEventListener('paste', (e) => {
+    e.preventDefault();
+    const html = e.clipboardData.getData('text/html');
+    const text = e.clipboardData.getData('text/plain');
+    if (html) {
+      docArea.innerHTML = html;
+      documentHtml = html;
+    } else {
+      docArea.textContent = text;
+      documentHtml = '';
+    }
+  });
+
+  docArea.addEventListener('input', () => {
+    documentHtml = docArea.innerHTML;
+  });
+
+  const docBtnRow = document.createElement('div');
+  docBtnRow.style.display = 'flex';
+  docBtnRow.style.gap = '6px';
+  docBtnRow.style.justifyContent = 'flex-end';
+  docBtnRow.style.alignItems = 'center';
+
+  const clearDocBtn = document.createElement('button');
+  clearDocBtn.type = 'button';
+  clearDocBtn.textContent = 'Clear';
+  clearDocBtn.style.fontSize = '11px';
+  clearDocBtn.style.background = 'none';
+  clearDocBtn.style.border = '1px solid rgba(0,0,0,0.2)';
+  clearDocBtn.style.borderRadius = '4px';
+  clearDocBtn.style.cursor = 'pointer';
+  clearDocBtn.style.padding = '3px 10px';
+  clearDocBtn.style.color = 'rgba(0,0,0,0.5)';
+  clearDocBtn.addEventListener('click', () => { docArea.innerHTML = ''; documentHtml = ''; });
+
+  // .docx upload — hidden file input + visible label button, revealed after mammoth loads
+  const docxInput = document.createElement('input');
+  docxInput.type = 'file';
+  docxInput.accept = '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  docxInput.style.display = 'none';
+
+  const uploadBtn = document.createElement('button');
+  uploadBtn.type = 'button';
+  uploadBtn.textContent = 'loading…';
+  uploadBtn.disabled = true;
+  uploadBtn.style.fontSize = '11px';
+  uploadBtn.style.background = 'none';
+  uploadBtn.style.border = '1px solid rgba(0,0,0,0.2)';
+  uploadBtn.style.borderRadius = '4px';
+  uploadBtn.style.cursor = 'default';
+  uploadBtn.style.padding = '3px 10px';
+  uploadBtn.style.color = 'rgba(0,0,0,0.35)';
+
+  docxInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file || !window.mammoth) return;
+    uploadBtn.textContent = 'reading…';
+    uploadBtn.disabled = true;
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const { value: html } = await window.mammoth.convertToHtml({ arrayBuffer });
+      docArea.innerHTML = html;
+      documentHtml = html;
+    } catch (err) {
+      docArea.textContent = 'Failed to read file: ' + err.message;
+    } finally {
+      uploadBtn.textContent = 'Upload .docx';
+      uploadBtn.disabled = false;
+      docxInput.value = '';
+    }
+  });
+
+  uploadBtn.addEventListener('click', () => { if (!uploadBtn.disabled) docxInput.click(); });
+
+  const buildBtn = document.createElement('button');
+  buildBtn.type = 'button';
+  buildBtn.className = 'btn btn-primary';
+  buildBtn.textContent = 'Build page';
+  buildBtn.style.fontSize = '11px';
+  buildBtn.style.padding = '3px 12px';
+
+  buildBtn.addEventListener('click', () => {
+    const raw = documentHtml || docArea.innerText;
+    if (!raw.trim()) return;
+    const md = documentHtml ? htmlToMarkdown(documentHtml) : raw.trim();
+    if (!md.trim()) return;
+    const prompt = `Rebuild this page's sections based on the document below. Use the blueprint to choose appropriate section types and fill in the content. Replace or add sections as needed.\n\n---\n\n${md}`;
+    switchTab('chat');
+    handleSend(prompt);
+  });
+
+  docBtnRow.appendChild(docxInput);
+  docBtnRow.appendChild(clearDocBtn);
+  docBtnRow.appendChild(uploadBtn);
+  docBtnRow.appendChild(buildBtn);
+  documentView.appendChild(docDesc);
+  documentView.appendChild(docArea);
+  documentView.appendChild(docBtnRow);
+
+  let mammothLoading = false;
+  function loadMammoth() {
+    if (window.mammoth || mammothLoading) return;
+    mammothLoading = true;
+    const cpRoot = window.Statamic?.$config?.get('cp_root') ?? '/cp';
+    const s = document.createElement('script');
+    s.src = `${cpRoot}/section-tools/mammoth.js`;
+    s.onload = () => {
+      uploadBtn.textContent = 'Upload .docx';
+      uploadBtn.disabled = false;
+      uploadBtn.style.cursor = 'pointer';
+      uploadBtn.style.color = 'rgba(0,0,0,0.6)';
+    };
+    s.onerror = () => { uploadBtn.textContent = 'docx N/A'; };
+    document.head.appendChild(s);
+  }
+
+  function switchTab(tab) {
+    currentTab = tab;
+    chatTabBtn.style.fontWeight = tab === 'chat' ? '600' : '400';
+    chatTabBtn.style.color = tab === 'chat' ? 'rgba(0,0,0,0.7)' : 'rgba(0,0,0,0.35)';
+    docTabBtn.style.fontWeight = tab === 'document' ? '600' : '400';
+    docTabBtn.style.color = tab === 'document' ? 'rgba(0,0,0,0.7)' : 'rgba(0,0,0,0.35)';
+    chatView.style.display = tab === 'chat' ? 'flex' : 'none';
+    documentView.style.display = tab === 'document' ? 'flex' : 'none';
+    headerButtons.style.visibility = tab === 'chat' ? 'visible' : 'hidden';
+    if (tab === 'document') loadMammoth();
+  }
+
+  chatTabBtn.addEventListener('click', () => switchTab('chat'));
+  docTabBtn.addEventListener('click', () => switchTab('document'));
 
   section.appendChild(headerRow);
-  section.appendChild(history);
-  section.appendChild(inputRow);
-  section.appendChild(tokenInfo);
+  section.appendChild(chatView);
+  section.appendChild(documentView);
 
-  async function handleSend() {
-    const text = textarea.value.trim();
+  async function handleSend(customText) {
+    const text = (customText ?? textarea.value).trim();
     if (!text) return;
 
-    textarea.value = '';
+    if (!customText) textarea.value = '';
     textarea.disabled = true;
     sendBtn.disabled = true;
+    buildBtn.disabled = true;
     sendBtn.textContent = '…';
 
-    messages.push({ role: 'user', content: text });
-    appendMessage(history, 'user', text);
+    const displayText = customText && customText.length > 120
+      ? customText.slice(0, 120) + '…'
+      : text;
+
+    // Document builds get cache_control so the large content is cached in subsequent rounds
+    const userContent = customText
+      ? [{ type: 'text', text, cache_control: { type: 'ephemeral' } }]
+      : text;
+    messages.push({ role: 'user', content: userContent });
+    appendMessage(history, 'user', displayText);
 
     let systemPrompt = buildSystemPrompt(getBrief);
     const msgCountBefore = messages.length;
@@ -937,12 +1261,13 @@ export function createChatSection(getBrief) {
     } finally {
       textarea.disabled = false;
       sendBtn.disabled = false;
+      buildBtn.disabled = false;
       sendBtn.textContent = 'Send';
       textarea.focus();
     }
   }
 
-  sendBtn.addEventListener('click', handleSend);
+  sendBtn.addEventListener('click', () => handleSend());
   textarea.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
