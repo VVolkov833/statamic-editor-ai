@@ -29,7 +29,7 @@ class ServiceProvider extends AddonServiceProvider
 
                 $payload = [
                     'model'      => env('ANTHROPIC_MODEL', 'claude-sonnet-4-6'),
-                    'max_tokens' => (int) env('ANTHROPIC_MAX_TOKENS', 1024),
+                    'max_tokens' => isset($raw->max_tokens) ? (int) $raw->max_tokens : (int) env('ANTHROPIC_MAX_TOKENS', 1024),
                     'messages'   => $raw->messages ?? [],
                 ];
 
@@ -41,7 +41,7 @@ class ServiceProvider extends AddonServiceProvider
                     $payload['tools'] = $raw->tools;
                 }
 
-                $response = Http::withHeaders([
+                $response = Http::timeout(180)->withHeaders([
                     'x-api-key'         => env('ANTHROPIC_API_KEY'),
                     'anthropic-version' => '2023-06-01',
                 ])->post('https://api.anthropic.com/v1/messages', $payload);
@@ -96,8 +96,25 @@ class ServiceProvider extends AddonServiceProvider
                             $fieldHandle = $fieldConfig['handle'] ?? null;
                             if (!$fieldHandle) continue;
 
-                            // Field def may be nested under 'field' key or flat
-                            $fieldDef  = is_array($fieldConfig['field'] ?? null) ? $fieldConfig['field'] : $fieldConfig;
+                            // Field def may be:
+                            //   (a) an inline array definition under 'field' key
+                            //   (b) a "fieldset.handle" string reference under 'field' key
+                            //   (c) flat (no 'field' key, definition is the config itself)
+                            $fieldRef = $fieldConfig['field'] ?? null;
+                            if (is_array($fieldRef)) {
+                                $fieldDef = $fieldRef;
+                            } elseif (is_string($fieldRef) && str_contains($fieldRef, '.')) {
+                                // Resolve "fieldset_handle.field_handle" references.
+                                [$fsHandle, $fsFieldHandle] = explode('.', $fieldRef, 2);
+                                $fs = \Statamic\Facades\Fieldset::find($fsHandle);
+                                $resolved = $fs?->fields()->all()[$fsFieldHandle] ?? null;
+                                $fieldDef = $resolved ? array_merge(
+                                    ['type' => $resolved->type(), 'display' => $resolved->display()],
+                                    $resolved->config()
+                                ) : $fieldConfig;
+                            } else {
+                                $fieldDef = $fieldConfig;
+                            }
                             $fieldType = $fieldDef['type'] ?? '';
                             $slim      = ['handle' => $fieldHandle];
                             if ($fieldType)                                    $slim['type']            = $fieldType;

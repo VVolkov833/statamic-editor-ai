@@ -98,6 +98,87 @@ function injectTopLevelItemMeta(statamic, rootHandle, newItemId, type) {
   }
 }
 
+// After update_item writes bard content that contains set nodes with nested replicators,
+// the Vuex meta for those set nodes and their items is missing — causing Vue component
+// crashes ("Cannot read properties of undefined"). This function patches meta so that
+// every bard set node and every replicator item inside it has the required meta entries.
+function injectBardSetsMeta(statamic, rootHandle, itemId, bardFieldUpdates) {
+  const publishStore = getPublishStore(statamic);
+  const meta = publishStore?.meta;
+  if (!meta) return;
+
+  const rootMeta = meta[rootHandle];
+  if (!rootMeta) return;
+
+  const itemMeta = rootMeta.existing?.[itemId];
+  if (!itemMeta) return;
+
+  let changed = false;
+  const newItemMeta = { ...itemMeta };
+
+  for (const [fieldHandle, bardNodes] of Object.entries(bardFieldUpdates)) {
+    if (!Array.isArray(bardNodes)) continue;
+    const bardFieldMeta = itemMeta[fieldHandle];
+    if (!bardFieldMeta || typeof bardFieldMeta !== 'object') continue;
+
+    const setNodes = bardNodes.filter(n => n?.type === 'set' && n?.attrs?.id && n?.attrs?.values?.type);
+    if (!setNodes.length) continue;
+
+    const bardNewTemplates = bardFieldMeta.new ?? {};
+    const existingBardMeta = { ...(bardFieldMeta.existing ?? {}) };
+    let bardChanged = false;
+
+    for (const node of setNodes) {
+      const setId   = node.attrs.id;
+      const setType = node.attrs.values.type;
+      if (existingBardMeta[setId]) continue; // meta already present
+
+      // Copy the new-item template for this set type, then patch in existing-item entries
+      // for any replicator items already in values.
+      const setMeta = cloneValue(bardNewTemplates[setType] ?? {});
+
+      for (const [subHandle, subValue] of Object.entries(node.attrs.values ?? {})) {
+        if (!Array.isArray(subValue) || !subValue.length) continue;
+        const subMeta = setMeta[subHandle];
+        if (!subMeta || typeof subMeta !== 'object' || !subMeta.new) continue;
+        const subExisting = { ...(subMeta.existing ?? {}) };
+        for (const subItem of subValue) {
+          const subId = subItem._id ?? subItem.id;
+          if (!subId || subExisting[subId]) continue;
+          subExisting[subId] = cloneValue(subMeta.new[subItem.type] ?? {});
+        }
+        setMeta[subHandle] = { ...subMeta, existing: subExisting };
+      }
+
+      existingBardMeta[setId] = setMeta;
+      bardChanged = true;
+    }
+
+    if (bardChanged) {
+      newItemMeta[fieldHandle] = { ...bardFieldMeta, existing: existingBardMeta };
+      changed = true;
+    }
+  }
+
+  if (!changed) return;
+
+  const updatedMeta = {
+    ...meta,
+    [rootHandle]: {
+      ...rootMeta,
+      existing: { ...rootMeta.existing, [itemId]: newItemMeta },
+    },
+  };
+
+  const moduleNames = getPublishModuleNames(statamic);
+  for (const moduleName of moduleNames) {
+    try {
+      statamic.$store.commit(`publish/${moduleName}/setMeta`, updatedMeta);
+      statamic.$store.dispatch(`publish/${moduleName}/setMeta`, updatedMeta);
+    } catch {}
+  }
+}
+
 // Statamic's code fieldtype only watches `value` in readOnly mode — in normal edit
 // mode CodeMirror is uncontrolled and ignores external value-prop changes.
 // CodeMirror writes the editor instance onto its container DOM element as el.CodeMirror,
@@ -282,13 +363,14 @@ function sanitizeBardContent(arr, blueprint) {
 
       const result = { ...node };
 
-      // text nodes: fix value→text, ensure text is a string
+      // text nodes: fix value→text, ensure text is a non-empty string
       if (node.type === 'text') {
         if (result.value !== undefined && result.text === undefined) {
           result.text = result.value;
           delete result.value;
         }
-        if (typeof result.text !== 'string') result.text = '';
+        if (typeof result.text !== 'string') result.text = String(result.text ?? '');
+        if (!result.text) return []; // ProseMirror forbids empty text nodes
         return [result];
       }
 
@@ -332,15 +414,16 @@ function sanitizeBardContent(arr, blueprint) {
             }
             return true;
           })
-          .map((inline) => {
-            if (inline.type !== 'text') return inline;
+          .flatMap((inline) => {
+            if (inline.type !== 'text') return [inline];
             const fixed = { ...inline };
             if (fixed.value !== undefined && fixed.text === undefined) {
               fixed.text = fixed.value;
               delete fixed.value;
             }
-            if (typeof fixed.text !== 'string') fixed.text = '';
-            return fixed;
+            if (typeof fixed.text !== 'string') fixed.text = String(fixed.text ?? '');
+            if (!fixed.text) return []; // drop empty text nodes
+            return [fixed];
           });
         // If paragraph became empty after extracting images, drop it and return just the sets
         if (result.content.length === 0 && imageSets.length > 0) return imageSets;
@@ -349,6 +432,17 @@ function sanitizeBardContent(arr, blueprint) {
 
       return [result];
     });
+}
+
+function bardArrayToPlainText(arr) {
+  if (!Array.isArray(arr)) return typeof arr === 'string' ? arr : String(arr ?? '');
+  function extractText(node) {
+    if (!node || typeof node !== 'object') return '';
+    if (node.type === 'text') return typeof node.text === 'string' ? node.text : '';
+    if (Array.isArray(node.content)) return node.content.map(extractText).join('');
+    return '';
+  }
+  return arr.map(extractText).filter(Boolean).join('\n').trim();
 }
 
 function injectReplicatorItemIds(arr) {
@@ -432,6 +526,7 @@ let totalOutputTokens = 0;
 let blueprintDataProvider = null;
 
 const MAX_ROUNDS = 8;
+const MAX_ROUNDS_BUILD = 20;
 const WRITE_TOOLS = new Set(['update_item', 'add_item', 'delete_item', 'move_item', 'update_field']);
 
 const AI_TOOLS = [
@@ -573,8 +668,46 @@ async function executeTool(name, input) {
     const values = getPublishStore(window.Statamic)?.values;
     if (!values) return { error: 'Publish store not found' };
     const blueprint = getPublishStore(window.Statamic)?.blueprint;
+    // Resolve the target item's set type so we can coerce fields to their declared types.
+    // Prefer the endpoint blueprint (fully resolves imported fieldsets) over Vuex-derived.
+    let itemFieldTypes = {};
+    for (const rootValue of Object.values(values)) {
+      if (!Array.isArray(rootValue)) continue;
+      const found = findItemWithParent(cloneValue(rootValue), input.id);
+      if (found?.item?.type) {
+        const setType = found.item.type;
+        const cachedSets = blueprintDataProvider?.()?.sets ?? {};
+        const cachedFields = cachedSets[setType]?.fields;
+        if (cachedFields) {
+          itemFieldTypes = Object.fromEntries(
+            cachedFields.filter(f => f.handle && f.type).map(f => [f.handle, f.type])
+          );
+        } else {
+          itemFieldTypes = getSetFieldTypes(blueprint, setType);
+        }
+        break;
+      }
+    }
+    const STRING_TYPES = new Set(['textarea', 'text', 'slug', 'markdown']);
+    const SELECT_TYPES = new Set(['select', 'radio', 'button_group']);
+    // Validate select fields before writing — wrong shapes cause Vue component crashes.
+    for (const [k, v] of Object.entries(input.fields)) {
+      if (SELECT_TYPES.has(itemFieldTypes[k]) && v !== null && typeof v !== 'string') {
+        return { error: `Field "${k}" is a ${itemFieldTypes[k]} field — value must be a plain option key string (e.g. "certificates_shortest"), never an object or array. Got: ${JSON.stringify(v)}` };
+      }
+    }
+    const bardFieldUpdates = {};
     const normalizedFields = Object.fromEntries(
-      Object.entries(input.fields).map(([k, v]) => [k, sanitizeBardContent(v, blueprint)]),
+      Object.entries(input.fields).map(([k, v]) => {
+        // Auto-convert bard arrays to plain text for fields declared as plain-string types.
+        if (STRING_TYPES.has(itemFieldTypes[k]) && Array.isArray(v)) {
+          return [k, bardArrayToPlainText(v)];
+        }
+        const sanitized = sanitizeBardContent(v, blueprint);
+        // Track bard field updates so we can inject meta for nested bard set nodes.
+        if (itemFieldTypes[k] === 'bard' && Array.isArray(sanitized)) bardFieldUpdates[k] = sanitized;
+        return [k, sanitized];
+      }),
     );
     for (const [rootHandle, rootValue] of Object.entries(values)) {
       if (!Array.isArray(rootValue)) continue;
@@ -583,6 +716,9 @@ async function executeTool(name, input) {
       if (type !== false) {
         pushUndoSnapshot();
         commitField(window.Statamic, rootHandle, cloned);
+        if (Object.keys(bardFieldUpdates).length) {
+          injectBardSetsMeta(window.Statamic, rootHandle, input.id, bardFieldUpdates);
+        }
         syncCodeMirrorValues(window.Statamic, input.id, normalizedFields);
         return { ok: true, type };
       }
@@ -636,21 +772,35 @@ async function executeTool(name, input) {
       }
     }
     const defaults = buildItemDefaults(blueprint, type, nestedParentType);
-    const fieldTypes = getSetFieldTypes(blueprint, type, nestedParentType);
+    // Field types from Vuex blueprint (may miss imported fieldsets); merge with endpoint blueprint.
+    const vuexFieldTypes = getSetFieldTypes(blueprint, type, nestedParentType);
+    const endpointFields = cachedSets[type]?.fields ?? [];
+    const endpointFieldTypes = Object.fromEntries(
+      endpointFields.filter(f => f.handle && f.type).map(f => [f.handle, f.type])
+    );
+    const fieldTypes = { ...vuexFieldTypes, ...endpointFieldTypes }; // endpoint wins
+    const STRING_FIELD_TYPES = new Set(['textarea', 'text', 'slug', 'markdown']);
     const REPLICATOR_FIELD_TYPES = new Set(['replicator', 'grid']);
+    const SELECT_FIELD_TYPES = new Set(['select', 'radio', 'button_group']);
+    for (const [k, v] of Object.entries(fields)) {
+      if (SELECT_FIELD_TYPES.has(fieldTypes[k]) && v !== null && typeof v !== 'string') {
+        return { error: `Field "${k}" is a ${fieldTypes[k]} field — value must be a plain option key string, never an object or array. Got: ${JSON.stringify(v)}` };
+      }
+    }
     // Bard fields are stripped — Statamic must initialize new items before bard content
     // can be set. Use update_item after creation to populate bard fields.
+    // String-type fields that receive a bard array are auto-converted to plain text.
     // Replicator/grid arrays get _id+enabled injected into sub-items.
     const skippedBard = [];
     const sanitizedFields = Object.fromEntries(
       Object.entries(fields).filter(([k, v]) => {
         if (fieldTypes[k] === 'bard' && Array.isArray(v)) { skippedBard.push(k); return false; }
         return true;
-      }).map(([k, v]) =>
-        Array.isArray(v) && REPLICATOR_FIELD_TYPES.has(fieldTypes[k])
-          ? [k, injectReplicatorItemIds(v)]
-          : [k, v],
-      ),
+      }).map(([k, v]) => {
+        if (STRING_FIELD_TYPES.has(fieldTypes[k]) && Array.isArray(v)) return [k, bardArrayToPlainText(v)];
+        if (Array.isArray(v) && REPLICATOR_FIELD_TYPES.has(fieldTypes[k])) return [k, injectReplicatorItemIds(v)];
+        return [k, v];
+      }),
     );
     const newItem = { _id: uid(), type, enabled: true, ...defaults, ...sanitizedFields };
 
@@ -774,10 +924,11 @@ function getXsrfToken() {
   return match ? decodeURIComponent(match[1]) : '';
 }
 
-async function sendToClaude(allMessages, systemPrompt, tools) {
+async function sendToClaude(allMessages, systemPrompt, tools, { maxTokens } = {}) {
   const body = { messages: allMessages };
   if (systemPrompt) body.system = systemPrompt;
   if (tools?.length) body.tools = tools;
+  if (maxTokens) body.max_tokens = maxTokens;
 
   const response = await fetch('/cp/section-tools/ai/chat', {
     method: 'POST',
@@ -965,6 +1116,11 @@ UPDATING: update_item patches any item at any depth by _id. To update a tile, ac
 ADDING: add_item takes parent + type. For top-level items use the root field handle as parent — call get_blueprint first and read the _root_field value on the set type you want (e.g. schema_set has _root_field:"schema", not "sections"). For nested items (e.g. a tile inside a section) use the parent item's _id as parent and set field to the replicator field name (e.g. "tiles"). The optional fields parameter is for scalar values (text, numbers, asset strings). If you pre-populate a nested replicator array via fields (e.g. fields.icons), every sub-item in that array MUST include "type" (the set handle from the blueprint) — _id and enabled are injected automatically.
 BARD FIELDS use ProseMirror JSON. Bard fields cannot be set during add_item — they are always initialized empty. If you pass bard content in add_item fields, the response will include "set_bard_fields" listing the skipped fields; immediately follow up with update_item calls (in parallel) to set those fields. For existing items, always call get_item first to read the current structure before editing. ProseMirror rules: text leaf nodes are {"type":"text","text":"..."} (never "value"); paragraphs are {"type":"paragraph","content":[{"type":"text","text":"..."}]}; headings are {"type":"heading","attrs":{"level":2,"textAlign":"left"},"content":[...]}; bard set nodes use {"type":"set","attrs":{"id":"...","values":{...}}} where values holds the set fields. IMAGES in bard: never use {"type":"image",...} inline nodes — that TipTap extension is not active. Embed images as bard sets: {"type":"set","attrs":{"id":"...","values":{"type":"image","enabled":true,"image":["assets::path/to/file.jpg"]}}}.
 ASSET FIELDS store values as "assets::path/to/file.jpg" strings (with the assets:: prefix). Always include this prefix when setting an asset field. Always call search_assets to verify an asset path before using it — even when the document provides a complete path. Use the provided path as the query. Once confirmed (matched_by="path", "filename", or "folder"), use the result path from the response. If the search returns no results, try a shorter part of the path or just the filename.
+GRID FIELDS (e.g. "rows" in a table group, "entries" in an accordion section, "icons" in some tile types) are flat arrays — each row has no _id and cannot use add_item. To populate a grid field use update_item on the parent item with the full array value. Example for table rows: update_item(groupId, {rows:[{label:"Label text",text:[{type:"paragraph",content:[{type:"text",text:"Value text"}]}]}, ...]}). Example for accordion: update_item(accordionId, {headline:"Title",entries:[{title:"Question?",text:[{type:"paragraph",content:[{type:"text",text:"Answer."}]}]}, ...]}).
+TEXTAREA FIELDS are plain strings. If get_blueprint shows a field with type "textarea" or "text" (input), always set it to a plain string — never pass an array or ProseMirror object.
+SELECT FIELDS (type: select, radio, button_group): always set to the option key as a plain string, exactly as listed under "options" in get_blueprint (e.g. badges_group: "certificates_shortest"). Never pass an object or array — that crashes the editor.
+BUTTONS in call_to_action sections: the "text" field is a plain textarea string. The "buttons" field is a replicator — add each button using add_item(parent=sectionId, field="buttons", type="button_book_page") etc., one call per button.
+BUTTONS BARD SET inside text fields (e.g. header text): button items live inside a bard set node of type "buttons". Include them inline in the values.buttons array when setting the bard field — do NOT use add_item for these. Call get_blueprint to find available button types (look for sets with names like "button_book_page" inside the "buttons" bard set). Example full bard array with a buttons set at the end: [{type:"heading",attrs:{level:1,textAlign:"left"},content:[{type:"text",text:"Title"}]},{type:"paragraph",content:[{type:"text",text:"Body."}]},{type:"set",attrs:{id:"UUID",values:{type:"buttons",enabled:true,align:"center",buttons:[{_id:"UUID",type:"button_book_page",enabled:true}]}}}]. Generate fresh UUIDs for all id/\_id fields.
 EMPTY FIELDS: The brief omits fields that have no value. The "_fields" key lists all known field handles for this entry type, including empty ones. If a user refers to a field not shown in the brief but listed in "_fields", use update_field or get_field directly — do not say the field doesn't exist.
 When passing a complex object or array as a tool argument value, pass it as a native JSON value — never as a JSON string.`;
 
@@ -1320,9 +1476,25 @@ export function createChatSection(getBrief, getBlueprintData) {
     const html = bardEditor?.getHTML() ?? '';
     const md = htmlToMarkdown(html);
     if (!md.trim()) return;
-    const prompt = `Rebuild this page's sections based on the document below. Use the blueprint to choose appropriate section types and fill in the content. Replace or add sections as needed.\n\n---\n\n${md}`;
+
+    // Clear existing sections client-side so the AI only adds — never deletes.
+    commitField(window.Statamic, 'sections', []);
+
+    const prompt =
+      'The page sections have been cleared. Build new sections from the document content below.\n' +
+      'Directives in blockquotes ("> [[ SECTION: type ]]") tell you which section type to create next.\n' +
+      'Use get_blueprint to learn available set types and field names before adding sections.\n' +
+      'GRID FIELDS: some fields (e.g. "rows" in table sections) are grid fields, NOT replicators. ' +
+      'Grid fields have no _id per row and cannot use add_item. ' +
+      'Populate a grid field by calling update_item on the parent with the full array value.\n' +
+      'TABLE SECTIONS — exact sequence (no deviation):\n' +
+      '  1. add_item(parent="sections", type="table") → note the returned id as TABLE_ID\n' +
+      '  2. add_item(parent=TABLE_ID, field="table", type="section") → note returned id as GROUP_ID\n' +
+      '  3. update_item(GROUP_ID, {rows:[{label:"Label",text:[{type:"paragraph",content:[{type:"text",text:"Value"}]}]}, ...]}) — do this immediately in the same tool batch as step 2 if possible, or in the very next tool call. Do NOT skip this step or say you will do it later.\n\n' +
+      '---\n\n' + md;
+
     switchTab('chat');
-    handleSend(prompt);
+    handleSend(prompt, { maxRounds: MAX_ROUNDS_BUILD, maxTokens: 8192, isBuild: true });
   });
 
   docBtnRow.appendChild(docxInput);
@@ -1369,7 +1541,7 @@ export function createChatSection(getBrief, getBlueprintData) {
   section.appendChild(chatView);
   section.appendChild(documentView);
 
-  async function handleSend(customText) {
+  async function handleSend(customText, { maxRounds = MAX_ROUNDS, maxTokens, isBuild = false } = {}) {
     const text = (customText ?? textarea.value).trim();
     if (!text) return;
 
@@ -1397,17 +1569,31 @@ export function createChatSection(getBrief, getBlueprintData) {
       let lastToolSignature = null;
       let finalText = null;
 
-      for (let round = 0; round < MAX_ROUNDS; round++) {
-        if (round > 0) sendBtn.textContent = `step ${round + 1}/${MAX_ROUNDS}…`;
+      for (let round = 0; round < maxRounds; round++) {
+        if (round > 0) sendBtn.textContent = `step ${round + 1}/${maxRounds}…`;
 
-        const data = await sendToClaude(messages, systemPrompt, AI_TOOLS);
+        const data = await sendToClaude(messages, systemPrompt, AI_TOOLS, { maxTokens });
 
         totalInputTokens += data.usage?.input_tokens ?? 0;
         totalOutputTokens += data.usage?.output_tokens ?? 0;
         updateTokenDisplay(tokenInfo);
 
         if (data.stop_reason !== 'tool_use') {
-          finalText = data.content?.find((b) => b.type === 'text')?.text ?? '[no response]';
+          const text = data.content?.find((b) => b.type === 'text')?.text ?? '';
+          // In build mode, detect planning-without-executing: AI announces intent (end_turn) but
+          // made no tool calls. Nudge it to proceed rather than silently stopping.
+          if (isBuild && round < maxRounds - 1) {
+            const NUDGE_PHRASES = ["i'll ", "i will ", "let me ", "now i'll ", "i'll now ", "i'm going to ", "i will now "];
+            if (NUDGE_PHRASES.some(p => text.toLowerCase().includes(p))) {
+              if (text.trim()) appendMessage(history, 'assistant', text);
+              messages.push({ role: 'assistant', content: data.content });
+              messages.push({ role: 'user', content: 'Please proceed with the tool calls you just described.' });
+              const nudgeMsg = appendTechnical(history, '→ [nudge: AI planned without tool calls — continuing loop]', true);
+              if (!showTechnical) nudgeMsg.style.display = 'none';
+              continue;
+            }
+          }
+          finalText = text || '[no response]';
           break;
         }
 
