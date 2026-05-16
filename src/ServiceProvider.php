@@ -180,11 +180,30 @@ class ServiceProvider extends AddonServiceProvider
                     $metaDir     = dirname($file->getPathname());          // …/folder/.meta
                     $assetFolder = dirname($metaDir);                      // …/folder
                     $filename    = substr($file->getFilename(), 0, -5);    // strip .yaml
-                    $assetPath   = ltrim(str_replace($root, '', $assetFolder), '/') . '/' . $filename;
+                    $folder      = ltrim(str_replace($root, '', $assetFolder), '/');
+                    $assetPath   = $folder . '/' . $filename;
 
-                    if (str_contains(strtolower($filename), $query) || str_contains(strtolower($alt), $query)) {
-                        $results[] = ['path' => $assetPath, 'alt' => $alt];
+                    $lowerFilename = strtolower($filename);
+                    $lowerFolder   = strtolower($folder);
+                    $lowerAlt      = strtolower($alt);
+                    $lowerPath     = strtolower($assetPath);
+
+                    // Determine the most specific match type.
+                    // Queries containing "/" are treated as full/partial path queries.
+                    if (str_contains($query, '/')) {
+                        if (!str_contains($lowerPath, $query)) continue;
+                        $matchedBy = 'path';
+                    } elseif (str_contains($lowerPath, $query) && str_contains($lowerFilename, $query)) {
+                        $matchedBy = 'filename';
+                    } elseif (str_contains($lowerPath, $query) && str_contains($lowerFolder, $query)) {
+                        $matchedBy = 'folder';
+                    } elseif (str_contains($lowerAlt, $query)) {
+                        $matchedBy = 'alt';
+                    } else {
+                        continue;
                     }
+
+                    $results[] = ['path' => $assetPath, 'alt' => $alt, 'matched_by' => $matchedBy];
                 }
 
                 return response()->json($results);

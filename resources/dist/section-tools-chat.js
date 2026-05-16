@@ -464,11 +464,11 @@ const AI_TOOLS = [
   },
   {
     name: 'search_assets',
-    description: 'Search for media assets by filename or alt text.',
+    description: 'Search for media assets. Always call this to verify an asset exists before using it — even when the document provides a full path. Query matching: if query contains "/" it matches against the full path (folder+filename+extension) → matched_by="path"; otherwise matches filename → matched_by="filename", folder name → matched_by="folder", or alt text → matched_by="alt". When a full path is provided (e.g. "7_botox/istock_2157073168_prostock_studio_geandert.jpg"), use it as the query exactly. Only set an asset field once search confirms the asset exists.',
     input_schema: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'Search term to match against filename or alt text' },
+        query: { type: 'string', description: 'Full path (e.g. "7_botox/file.jpg"), partial path ("7_botox/istock_2157"), filename ("dr_yun.jpg"), folder ("7_botox"), or alt text keywords.' },
       },
       required: ['query'],
     },
@@ -964,7 +964,7 @@ READING: The brief contains every item's _id, type, and key content. Do NOT call
 UPDATING: update_item patches any item at any depth by _id. To update a tile, accordion item, or any nested item, use its own _id directly — no need to reconstruct the parent array. For top-level scalar fields (title, date, slug, etc.) use update_field.
 ADDING: add_item takes parent + type. For top-level items use the root field handle as parent — call get_blueprint first and read the _root_field value on the set type you want (e.g. schema_set has _root_field:"schema", not "sections"). For nested items (e.g. a tile inside a section) use the parent item's _id as parent and set field to the replicator field name (e.g. "tiles"). The optional fields parameter is for scalar values (text, numbers, asset strings). If you pre-populate a nested replicator array via fields (e.g. fields.icons), every sub-item in that array MUST include "type" (the set handle from the blueprint) — _id and enabled are injected automatically.
 BARD FIELDS use ProseMirror JSON. Bard fields cannot be set during add_item — they are always initialized empty. If you pass bard content in add_item fields, the response will include "set_bard_fields" listing the skipped fields; immediately follow up with update_item calls (in parallel) to set those fields. For existing items, always call get_item first to read the current structure before editing. ProseMirror rules: text leaf nodes are {"type":"text","text":"..."} (never "value"); paragraphs are {"type":"paragraph","content":[{"type":"text","text":"..."}]}; headings are {"type":"heading","attrs":{"level":2,"textAlign":"left"},"content":[...]}; bard set nodes use {"type":"set","attrs":{"id":"...","values":{...}}} where values holds the set fields. IMAGES in bard: never use {"type":"image",...} inline nodes — that TipTap extension is not active. Embed images as bard sets: {"type":"set","attrs":{"id":"...","values":{"type":"image","enabled":true,"image":["assets::path/to/file.jpg"]}}}.
-ASSET FIELDS store values as "assets::path/to/file.jpg" strings (with the assets:: prefix). Always include this prefix when setting an asset field.
+ASSET FIELDS store values as "assets::path/to/file.jpg" strings (with the assets:: prefix). Always include this prefix when setting an asset field. Always call search_assets to verify an asset path before using it — even when the document provides a complete path. Use the provided path as the query. Once confirmed (matched_by="path", "filename", or "folder"), use the result path from the response. If the search returns no results, try a shorter part of the path or just the filename.
 EMPTY FIELDS: The brief omits fields that have no value. The "_fields" key lists all known field handles for this entry type, including empty ones. If a user refers to a field not shown in the brief but listed in "_fields", use update_field or get_field directly — do not say the field doesn't exist.
 When passing a complex object or array as a tool argument value, pass it as a native JSON value — never as a JSON string.`;
 
