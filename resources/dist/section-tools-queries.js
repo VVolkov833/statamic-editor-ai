@@ -304,7 +304,61 @@ export function logAssetSearch() {
   searchAssets('Oberschenkel');
 }
 
+// Build a map of setTypeHandle -> rootFieldHandle.
+// Mirrors the same detection logic as extractBlueprintSets (handle + display + no type + fields[])
+// but is scoped per top-level field so we know which root field each set type belongs to.
+export function buildRootFieldMap(blueprint) {
+  const result = {};
+  function findSets(node, rootHandle, depth) {
+    if (!node || typeof node !== 'object' || depth > 8) return;
+    if (Array.isArray(node)) { node.forEach((item) => findSets(item, rootHandle, depth)); return; }
+    if (
+      typeof node.handle === 'string' &&
+      typeof node.display === 'string' &&
+      node.type == null &&
+      Array.isArray(node.fields) &&
+      node.fields.length > 0
+    ) {
+      result[node.handle] = rootHandle;
+      node.fields.forEach((f) => findSets(f, rootHandle, depth + 1));
+      return;
+    }
+    try { Object.values(node).forEach((v) => findSets(v, rootHandle, depth + 1)); } catch {}
+  }
+  try {
+    const tabs = blueprint?.tabs;
+    if (!tabs) return result;
+    for (const tabKey of Object.keys(tabs)) {
+      const tab = tabs[tabKey];
+      for (const section of (tab?.sections ?? [])) {
+        for (const fieldNode of (section?.fields ?? [])) {
+          const handle = fieldNode?.handle;
+          if (!handle) continue;
+          findSets(fieldNode, handle, 0);
+        }
+      }
+    }
+  } catch {}
+  return result;
+}
+
+// Returns an error object if `type` is not valid for `fieldHandle`, null if valid (or unknown).
+export function validateSetTypeForField(blueprint, type, fieldHandle) {
+  const rootFieldMap = buildRootFieldMap(blueprint);
+  const correctField = rootFieldMap[type];
+  const validTypes = Object.entries(rootFieldMap)
+    .filter(([, f]) => f === fieldHandle)
+    .map(([t]) => t);
+  if (validTypes.length === 0) return null; // No blueprint info for this field — allow
+  if (validTypes.includes(type)) return null; // Valid
+  const suggestion = correctField ? ` Use parent: "${correctField}" instead.` : '';
+  return {
+    error: `Type "${type}" is not valid for field "${fieldHandle}".${suggestion} Valid types for "${fieldHandle}": [${validTypes.join(', ')}]`,
+  };
+}
+
 export function extractBlueprintSets(blueprint) {
+  const rootFieldMap = buildRootFieldMap(blueprint);
   const sets = {};
 
   function traverse(node, ancestorSetHandle) {
@@ -335,6 +389,8 @@ export function extractBlueprintSets(blueprint) {
           }),
       };
       if (ancestorSetHandle) entry._parent_set = ancestorSetHandle;
+      const rf = rootFieldMap[node.handle];
+      if (rf) entry._root_field = rf;
       sets[node.handle] = entry;
       // Traverse this set's fields with this set as the ancestor, so nested set types
       // inherit _parent_set = this set's handle.

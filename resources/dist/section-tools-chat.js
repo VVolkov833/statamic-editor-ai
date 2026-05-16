@@ -1,5 +1,5 @@
 import { getPublishStore, uid, getPublishModuleNames, cloneValue, commitField } from './section-tools-lib.js';
-import { simplifyBlueprintNode, fetchAssetsForAI, extractBlueprintSets } from './section-tools-queries.js';
+import { simplifyBlueprintNode, fetchAssetsForAI, extractBlueprintSets, validateSetTypeForField, buildRootFieldMap } from './section-tools-queries.js';
 import { pushUndoSnapshot } from './section-tools-mutations.js';
 
 function injectNestedItemMeta(statamic, rootHandle, parentId, field, newItemId, type) {
@@ -43,6 +43,126 @@ function injectNestedItemMeta(statamic, rootHandle, parentId, field, newItemId, 
       statamic.$store.dispatch(`publish/${moduleName}/setMeta`, updatedMeta);
     } catch {}
   }
+}
+
+function injectTopLevelItemMeta(statamic, rootHandle, newItemId, type) {
+  const publishStore = getPublishStore(statamic);
+  const meta = publishStore?.meta;
+  if (!meta) return;
+
+  const rootFieldMeta = meta[rootHandle];
+  if (!rootFieldMeta) return;
+
+  // Prefer copying from an existing item of the same type — Statamic initialized that meta
+  // correctly. Fall back to the new[type] template, then to blueprint-derived field stubs.
+  let typeTemplate = null;
+  const valuesArr = publishStore?.values?.[rootHandle];
+  if (Array.isArray(valuesArr)) {
+    for (const item of valuesArr) {
+      if (item?.type === type && item?._id && rootFieldMeta.existing?.[item._id]) {
+        typeTemplate = cloneValue(rootFieldMeta.existing[item._id]);
+        break;
+      }
+    }
+  }
+  if (!typeTemplate && rootFieldMeta?.new?.[type]) {
+    typeTemplate = cloneValue(rootFieldMeta.new[type]);
+  }
+  if (!typeTemplate) {
+    // Build stub from cached blueprint: each field handle → {} so field components
+    // receive a defined (if empty) meta object rather than undefined.
+    const cachedSets = blueprintDataProvider?.()?.sets ?? {};
+    const setDef = cachedSets[type];
+    typeTemplate = setDef?.fields?.length
+      ? Object.fromEntries(setDef.fields.map((f) => [f.handle, {}]))
+      : {};
+  }
+
+  const updatedMeta = {
+    ...meta,
+    [rootHandle]: {
+      ...rootFieldMeta,
+      existing: {
+        ...(rootFieldMeta.existing ?? {}),
+        [newItemId]: typeTemplate,
+      },
+    },
+  };
+
+  const moduleNames = getPublishModuleNames(statamic);
+  for (const moduleName of moduleNames) {
+    try {
+      statamic.$store.commit(`publish/${moduleName}/setMeta`, updatedMeta);
+      statamic.$store.dispatch(`publish/${moduleName}/setMeta`, updatedMeta);
+    } catch {}
+  }
+}
+
+// Statamic's code fieldtype only watches `value` in readOnly mode — in normal edit
+// mode CodeMirror is uncontrolled and ignores external value-prop changes.
+// CodeMirror writes the editor instance onto its container DOM element as el.CodeMirror,
+// which is more reliable to locate than walking the Vue component tree.
+function syncCodeMirrorValues(statamic, itemId, fieldValues) {
+  requestAnimationFrame(() => {
+    const cmEls = Array.from(document.querySelectorAll('.CodeMirror'));
+    if (!cmEls.length) return;
+
+    // Walk up the DOM collecting Vue component instances attached as el.__vue__.
+    function collectAncestorVms(startEl, maxDepth = 60) {
+      const vms = [];
+      let cur = startEl;
+      for (let i = 0; i < maxDepth && cur; i++, cur = cur.parentElement) {
+        if (cur.__vue__) vms.push(cur.__vue__);
+      }
+      return vms;
+    }
+
+    function getHandle(vm) {
+      return vm.$props?.handle ?? vm.$props?.config?.handle ?? vm.$props?.field?.handle ?? null;
+    }
+
+    function hasItemId(vm, id) {
+      const d = vm.$data ?? {};
+      const p = vm.$props ?? {};
+      return [d.row, d.item, d.set, d.value, p.row, p.item, p.set, p.value]
+        .some((v) => v?._id === id);
+    }
+
+    for (const [handle, val] of Object.entries(fieldValues)) {
+      if (typeof val !== 'string') continue;
+
+      let cm = null;
+
+      // Primary: find the editor that belongs to our item and matches the handle.
+      for (const el of cmEls) {
+        const instance = el.CodeMirror;
+        if (!instance || typeof instance.setValue !== 'function') continue;
+        const ancestors = collectAncestorVms(el);
+        if (ancestors.some((vm) => hasItemId(vm, itemId)) && ancestors.some((vm) => getHandle(vm) === handle)) {
+          cm = instance;
+          break;
+        }
+      }
+
+      // Fallback: match by handle alone on any editor whose current value differs.
+      if (!cm) {
+        for (const el of cmEls) {
+          const instance = el.CodeMirror;
+          if (!instance || typeof instance.setValue !== 'function') continue;
+          const ancestors = collectAncestorVms(el);
+          if (ancestors.some((vm) => getHandle(vm) === handle) && instance.getValue() !== val) {
+            cm = instance;
+            break;
+          }
+        }
+      }
+
+      if (cm && cm.getValue() !== val) {
+        cm.setValue(val);
+        cm.refresh();
+      }
+    }
+  });
 }
 
 function getItemId(item) {
@@ -309,6 +429,7 @@ function buildItemDefaults(blueprint, type, parentType) {
 let messages = [];
 let totalInputTokens = 0;
 let totalOutputTokens = 0;
+let blueprintDataProvider = null;
 
 const MAX_ROUNDS = 8;
 const WRITE_TOOLS = new Set(['update_item', 'add_item', 'delete_item', 'move_item', 'update_field']);
@@ -338,7 +459,7 @@ const AI_TOOLS = [
   },
   {
     name: 'get_blueprint',
-    description: 'Get the page blueprint — all available item types and their fields. Each entry may include _parent_set indicating which section type this item type belongs to (e.g. tile types with _parent_set:"tiles" are only valid inside "tiles" sections). Always respect _parent_set when choosing a type for add_item.',
+    description: 'Get the page blueprint — all available item types and their fields. Each entry includes _root_field (the top-level field handle to use as parent in add_item, e.g. "sections" or "schema") and may include _parent_set (for nested types that are only valid inside a specific parent section type). Always use _root_field as parent for top-level add_item calls.',
     input_schema: { type: 'object', properties: {} },
   },
   {
@@ -366,7 +487,7 @@ const AI_TOOLS = [
   },
   {
     name: 'add_item',
-    description: 'Add a new item to any replicator. "parent" is either a root field handle (e.g. "sections", "header") for top-level items, or the _id of a parent item for nested items. When parent is an _id, "field" is required — the replicator field name within that parent (e.g. "tiles").',
+    description: 'Add a new item to any replicator. "parent" is either a root field handle (e.g. "sections", "schema") for top-level items, or the _id of a parent item for nested items. Use get_blueprint to find the correct root field handle for a type (_root_field key). When parent is an _id, "field" is required — the replicator field name within that parent (e.g. "tiles"). Adding an invalid type to a field returns an error with the correct parent suggestion.',
     input_schema: {
       type: 'object',
       properties: {
@@ -436,6 +557,9 @@ async function executeTool(name, input) {
   }
 
   if (name === 'get_blueprint') {
+    const cached = blueprintDataProvider?.()?.sets;
+    if (cached && Object.keys(cached).length > 0) return cached;
+    // Fallback: derive from Vuex blueprint (less complete but always available)
     const blueprint = getPublishStore(window.Statamic)?.blueprint;
     if (!blueprint) return { error: 'Blueprint not found' };
     return extractBlueprintSets(blueprint);
@@ -459,6 +583,7 @@ async function executeTool(name, input) {
       if (type !== false) {
         pushUndoSnapshot();
         commitField(window.Statamic, rootHandle, cloned);
+        syncCodeMirrorValues(window.Statamic, input.id, normalizedFields);
         return { ok: true, type };
       }
     }
@@ -473,7 +598,35 @@ async function executeTool(name, input) {
     // Pre-scan: if parent is a nested item _id (not a top-level field), find its type so
     // buildItemDefaults picks the correct set definition when handles collide across levels
     // (e.g. section type "text" and tile type "text" both have handle "text").
-    const isTopLevel = typeof parent === 'string' && parent in values;
+    // An empty replicator field won't appear in `values` — treat it as top-level if it's a
+    // known root field according to the endpoint blueprint or the Vuex-derived map.
+    const cachedSets = blueprintDataProvider?.()?.sets ?? {};
+    const hasCached = Object.keys(cachedSets).length > 0;
+    const knownRootFields = new Set([
+      ...Object.values(cachedSets).map((s) => s._root_field).filter(Boolean),
+      ...Object.values(blueprint ? buildRootFieldMap(blueprint) : {}),
+    ]);
+    const isTopLevel = typeof parent === 'string' && (parent in values || knownRootFields.has(parent));
+
+    // Validate the type against the target field's allowed set types.
+    // Endpoint data is authoritative; fall back to Vuex-derived validation.
+    if (isTopLevel) {
+      if (hasCached) {
+        const requestedSet = cachedSets[type];
+        const correctField = requestedSet?._root_field;
+        const validForField = Object.entries(cachedSets)
+          .filter(([, s]) => s._root_field === parent && !s._parent_set)
+          .map(([t]) => t);
+        if (validForField.length > 0 && !validForField.includes(type)) {
+          const suggestion = correctField ? ` Use parent: "${correctField}" instead.` : '';
+          return { error: `Type "${type}" is not valid for field "${parent}".${suggestion} Valid types for "${parent}": [${validForField.join(', ')}]` };
+        }
+      } else if (blueprint) {
+        const typeError = validateSetTypeForField(blueprint, type, parent);
+        if (typeError) return typeError;
+      }
+    }
+
     let nestedParentType;
     if (!isTopLevel) {
       for (const rootValue of Object.values(values)) {
@@ -505,7 +658,15 @@ async function executeTool(name, input) {
       const cloned = cloneValue(Array.isArray(values[parent]) ? values[parent] : []);
       insertAfterIdOrAppend(cloned, newItem, after_id);
       pushUndoSnapshot();
+      // Values must be committed first so Vue knows the set type (and can resolve
+      // field configs from the blueprint) when the meta commit triggers re-render.
       commitField(window.Statamic, parent, cloned);
+      injectTopLevelItemMeta(window.Statamic, parent, newItem._id, type);
+      // Push any string field values into CodeMirror after Vue renders — code fieldtypes
+      // are uncontrolled and don't watch their value prop in normal (editable) mode.
+      if (Object.keys(sanitizedFields).length > 0) {
+        syncCodeMirrorValues(window.Statamic, newItem._id, sanitizedFields);
+      }
       return skippedBard.length
         ? { ok: true, id: newItem._id, set_bard_fields: skippedBard }
         : { ok: true, id: newItem._id };
@@ -519,7 +680,7 @@ async function executeTool(name, input) {
       if (parentFound) {
         const parentType = parentFound.item?.type;
         if (parentType && blueprint) {
-          const allSets = extractBlueprintSets(blueprint);
+          const allSets = hasCached ? cachedSets : extractBlueprintSets(blueprint);
           const requestedSet = allSets[type];
           if (requestedSet?._parent_set && requestedSet._parent_set !== parentType) {
             const validTypes = Object.values(allSets)
@@ -801,7 +962,7 @@ BRIEF: The brief is rebuilt after every write operation and always reflects curr
 HIERARCHY: The word "section" always means a top-level entry in the sections (or equivalent) array. Items nested inside a section (tiles, accordion items, etc.) are sub-items — not sections themselves. When looking for a section by type, only consider top-level entries.
 READING: The brief contains every item's _id, type, and key content. Do NOT call get_item before delete, move, or update_item — derive the _id from the brief. Only call get_item when you need full raw data not in the brief (e.g. complete ProseMirror nodes of a bard field you intend to edit).
 UPDATING: update_item patches any item at any depth by _id. To update a tile, accordion item, or any nested item, use its own _id directly — no need to reconstruct the parent array. For top-level scalar fields (title, date, slug, etc.) use update_field.
-ADDING: add_item takes parent + type. Use the root field handle as parent for top-level items (the top-level keys visible in the brief, e.g. "sections", "header"). For nested items (e.g. a tile inside a section) use the parent item's _id as parent and set field to the replicator field name (e.g. "tiles"). The optional fields parameter is for scalar values (text, numbers, asset strings). If you pre-populate a nested replicator array via fields (e.g. fields.icons), every sub-item in that array MUST include "type" (the set handle from the blueprint) — _id and enabled are injected automatically.
+ADDING: add_item takes parent + type. For top-level items use the root field handle as parent — call get_blueprint first and read the _root_field value on the set type you want (e.g. schema_set has _root_field:"schema", not "sections"). For nested items (e.g. a tile inside a section) use the parent item's _id as parent and set field to the replicator field name (e.g. "tiles"). The optional fields parameter is for scalar values (text, numbers, asset strings). If you pre-populate a nested replicator array via fields (e.g. fields.icons), every sub-item in that array MUST include "type" (the set handle from the blueprint) — _id and enabled are injected automatically.
 BARD FIELDS use ProseMirror JSON. Bard fields cannot be set during add_item — they are always initialized empty. If you pass bard content in add_item fields, the response will include "set_bard_fields" listing the skipped fields; immediately follow up with update_item calls (in parallel) to set those fields. For existing items, always call get_item first to read the current structure before editing. ProseMirror rules: text leaf nodes are {"type":"text","text":"..."} (never "value"); paragraphs are {"type":"paragraph","content":[{"type":"text","text":"..."}]}; headings are {"type":"heading","attrs":{"level":2,"textAlign":"left"},"content":[...]}; bard set nodes use {"type":"set","attrs":{"id":"...","values":{...}}} where values holds the set fields. IMAGES in bard: never use {"type":"image",...} inline nodes — that TipTap extension is not active. Embed images as bard sets: {"type":"set","attrs":{"id":"...","values":{"type":"image","enabled":true,"image":["assets::path/to/file.jpg"]}}}.
 ASSET FIELDS store values as "assets::path/to/file.jpg" strings (with the assets:: prefix). Always include this prefix when setting an asset field.
 EMPTY FIELDS: The brief omits fields that have no value. The "_fields" key lists all known field handles for this entry type, including empty ones. If a user refers to a field not shown in the brief but listed in "_fields", use update_field or get_field directly — do not say the field doesn't exist.
@@ -902,7 +1063,8 @@ function mountBardEditor(container) {
   };
 }
 
-export function createChatSection(getBrief) {
+export function createChatSection(getBrief, getBlueprintData) {
+  blueprintDataProvider = getBlueprintData ?? null;
   let showTechnical = true;
 
   const section = document.createElement('div');

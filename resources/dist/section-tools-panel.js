@@ -130,7 +130,7 @@ function makePanelDraggable(panel, handle, panelStorageKey) {
   handle.addEventListener('pointercancel', finishDrag);
 }
 
-function createFloatingPanel(actions, panelStorageKey, getBrief) {
+function createFloatingPanel(actions, panelStorageKey, getBrief, getBlueprintData) {
   const panel = document.createElement('div');
   panel.id = PANEL_ID;
   panel.style.position = 'fixed';
@@ -155,19 +155,19 @@ function createFloatingPanel(actions, panelStorageKey, getBrief) {
   handle.style.color = 'var(--text, #111)';
 
   panel.appendChild(handle);
-  panel.appendChild(createChatSection(getBrief ?? (() => defaultBuildPageBrief())));
+  panel.appendChild(createChatSection(getBrief ?? (() => defaultBuildPageBrief()), getBlueprintData));
   panel.appendChild(createPanelGroup(actions));
   makePanelDraggable(panel, handle, panelStorageKey);
 
   return panel;
 }
 
-function mountFloatingPanel(isInScope, actions, panelStorageKey, getBrief) {
+function mountFloatingPanel(isInScope, actions, panelStorageKey, getBrief, getBlueprintData) {
   if (!isInScope() || document.getElementById(PANEL_ID)) {
     return;
   }
 
-  const panel = createFloatingPanel(actions, panelStorageKey, getBrief);
+  const panel = createFloatingPanel(actions, panelStorageKey, getBrief, getBlueprintData);
   document.body.appendChild(panel);
 
   const savedPosition = readPanelPosition(panelStorageKey);
@@ -191,9 +191,9 @@ function unmountFloatingPanelWhenOutOfScope(isInScope) {
 }
 
 export function syncSectionToolsUi(options) {
-  const { isInScope, actions, panelStorageKey, getBrief } = options;
+  const { isInScope, actions, panelStorageKey, getBrief, getBlueprintData } = options;
 
-  mountFloatingPanel(isInScope, actions, panelStorageKey, getBrief);
+  mountFloatingPanel(isInScope, actions, panelStorageKey, getBrief, getBlueprintData);
   unmountFloatingPanelWhenOutOfScope(isInScope);
 }
 

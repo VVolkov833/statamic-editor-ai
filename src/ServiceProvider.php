@@ -53,6 +53,103 @@ class ServiceProvider extends AddonServiceProvider
                 return response()->json($response->json(), $response->status());
             });
 
+            Route::get('section-tools/blueprint', function (Request $request) {
+                $collection = trim($request->get('collection', ''));
+                $blueprint  = trim($request->get('blueprint', 'default'));
+
+                $empty = ['fields' => [], 'sets' => []];
+                if ($collection === '') return response()->json($empty);
+
+                $bp = \Statamic\Facades\Blueprint::find("collections/{$collection}/{$blueprint}");
+                if (!$bp) return response()->json($empty);
+
+                $OPTION_TYPES     = ['select', 'radio', 'button_group', 'checkboxes', 'dictionary'];
+                $REPLICATOR_TYPES = ['replicator', 'bard'];
+
+                // Recursively flatten set definitions from a raw sets config array.
+                // Handles both flat sets and grouped sets (Statamic 4 groups).
+                $allSets    = [];
+                $extractSets = null;
+                $extractSets = function (array $rawSets, string $rootField, ?string $parentSet) use (
+                    &$extractSets, &$allSets, $OPTION_TYPES, $REPLICATOR_TYPES
+                ) {
+                    foreach ($rawSets as $key => $config) {
+                        if (!is_array($config)) continue;
+
+                        // Statamic 4 group: { display, sets: { set_handle: {...} } }
+                        if (isset($config['sets']) && is_array($config['sets']) && !isset($config['fields'])) {
+                            $extractSets($config['sets'], $rootField, $parentSet);
+                            continue;
+                        }
+
+                        // Transparent wrapper (no display/fields/sets at this level):
+                        // Statamic may emit an extra nesting layer, e.g. { sets: { group: {...} } }.
+                        // Recurse into the value so inner groups/set-types are found.
+                        if (!isset($config['fields'])) {
+                            $extractSets($config, $rootField, $parentSet);
+                            continue;
+                        }
+
+                        // Set type: { display, fields: [...] }
+                        $setFields = [];
+                        foreach ($config['fields'] ?? [] as $fieldConfig) {
+                            $fieldHandle = $fieldConfig['handle'] ?? null;
+                            if (!$fieldHandle) continue;
+
+                            // Field def may be nested under 'field' key or flat
+                            $fieldDef  = is_array($fieldConfig['field'] ?? null) ? $fieldConfig['field'] : $fieldConfig;
+                            $fieldType = $fieldDef['type'] ?? '';
+                            $slim      = ['handle' => $fieldHandle];
+                            if ($fieldType)                                    $slim['type']            = $fieldType;
+                            if (!empty($fieldDef['display']))                  $slim['display']         = $fieldDef['display'];
+                            if (isset($fieldDef['max_files']))                 $slim['max_files']       = (int) $fieldDef['max_files'];
+                            if (!empty($fieldDef['required']))                 $slim['required']        = true;
+                            if (!empty($fieldDef['character_limit']))          $slim['character_limit'] = $fieldDef['character_limit'];
+                            if (in_array($fieldType, $OPTION_TYPES, true) && !empty($fieldDef['options'])) {
+                                $slim['options'] = $fieldDef['options'];
+                            }
+                            $setFields[] = $slim;
+
+                            // Recurse into nested replicators/bards within this set
+                            if (in_array($fieldType, $REPLICATOR_TYPES, true) && !empty($fieldDef['sets'])) {
+                                $extractSets($fieldDef['sets'], $rootField, $key);
+                            }
+                        }
+
+                        $entry = [
+                            'handle'      => $key,
+                            'display'     => $config['display'] ?? $key,
+                            '_root_field' => $rootField,
+                            'fields'      => $setFields,
+                        ];
+                        if ($parentSet !== null) $entry['_parent_set'] = $parentSet;
+                        $allSets[$key] = $entry;
+                    }
+                };
+
+                // Top-level fields + trigger set extraction for replicator/bard fields
+                $fields = [];
+                foreach ($bp->fields()->all() as $handle => $field) {
+                    $type    = $field->type();
+                    $display = $field->display();
+                    $entry   = [];
+                    if ($display) $entry['display'] = $display;
+                    if ($type)    $entry['type']    = $type;
+                    if (in_array($type, $OPTION_TYPES, true)) {
+                        $options = $field->config('options');
+                        if ($options) $entry['options'] = $options;
+                    }
+                    $fields[$handle] = $entry;
+
+                    if (in_array($type, $REPLICATOR_TYPES, true)) {
+                        $rawSets = $field->config('sets') ?? [];
+                        if ($rawSets) $extractSets($rawSets, $handle, null);
+                    }
+                }
+
+                return response()->json(['fields' => $fields, 'sets' => $allSets]);
+            });
+
             Route::get('section-tools/assets/search', function (Request $request) {
                 $query = strtolower(trim($request->get('query', '')));
 

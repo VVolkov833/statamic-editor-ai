@@ -14,7 +14,7 @@ import {
   logAssetSearch,
 } from './section-tools-queries';
 import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tools-panel';
-import { getPublishStore as libGetPublishStore } from './section-tools-lib';
+import { getPublishStore as libGetPublishStore, buildPageBrief as libBuildPageBrief } from './section-tools-lib';
 
 (() => {
   const viteHost = window.location.hostname || '127.0.0.1';
@@ -62,6 +62,63 @@ import { getPublishStore as libGetPublishStore } from './section-tools-lib';
   window.__sectionToolsLoaded = true;
   console.info('[SectionTools] cp.js loaded', window.location.pathname);
 
+  // Blueprint cache: keyed by "collection/blueprint", value is {fields, sets} from PHP endpoint.
+  const blueprintCache = {};
+
+  function getCollectionFromPath(pathname) {
+    const parts = pathname.split('/');
+    const idx = parts.indexOf('collections');
+    return idx >= 0 ? (parts[idx + 1] ?? null) : null;
+  }
+
+  function fetchBlueprintData(collection, blueprint) {
+    const cacheKey = `${collection}/${blueprint}`;
+    if (blueprintCache[cacheKey] !== undefined) return;
+    blueprintCache[cacheKey] = null; // mark as in-flight
+
+    const cpRoot = window.Statamic?.$config?.get('cp_root') ?? '/cp';
+    const xsrf = document.cookie.match(/(?:^|;\s*)XSRF-TOKEN=([^;]+)/)?.[1] ?? '';
+    fetch(`${cpRoot}/section-tools/blueprint?collection=${encodeURIComponent(collection)}&blueprint=${encodeURIComponent(blueprint)}`, {
+      headers: { 'X-XSRF-TOKEN': decodeURIComponent(xsrf) },
+    })
+      .then((r) => r.json())
+      .then((data) => { blueprintCache[cacheKey] = data; })
+      .catch(() => { blueprintCache[cacheKey] = { fields: {}, sets: {} }; });
+  }
+
+  function getBlueprintData() {
+    const store = libGetPublishStore(window.Statamic);
+    const bpName = store?.blueprint?.handle ?? 'default';
+    const collection = getCollectionFromPath(window.location.pathname);
+    if (!collection) return null;
+    const cacheKey = `${collection}/${bpName}`;
+    fetchBlueprintData(collection, bpName);
+    return blueprintCache[cacheKey] ?? null;
+  }
+
+  function buildBrief() {
+    const bpData = getBlueprintData();
+    const store = libGetPublishStore(window.Statamic);
+    const extraFields = { ...(bpData?.fields ?? {}) };
+    // Backfill from _root_field on set definitions — covers replicator fields in secondary
+    // blueprint tabs even when the async fetch hasn't completed yet (bpData null).
+    if (bpData?.sets) {
+      for (const setDef of Object.values(bpData.sets)) {
+        const rf = setDef._root_field;
+        if (rf && !extraFields[rf]) extraFields[rf] = { type: 'replicator' };
+      }
+    }
+    // Backfill from Vuex values — catches scalar fields in secondary tabs (e.g. meta_title
+    // in SEO tab) that have values but aren't in the active blueprint or bpData yet.
+    const values = store?.values ?? {};
+    for (const [handle, val] of Object.entries(values)) {
+      if (!extraFields[handle]) {
+        extraFields[handle] = Array.isArray(val) ? { type: 'replicator' } : {};
+      }
+    }
+    return libBuildPageBrief(null, { extraFields });
+  }
+
   function isEntryEditScreen() {
     const isCollectionsRoute = window.location.pathname.includes('/collections/');
     const store = libGetPublishStore(window.Statamic);
@@ -79,6 +136,8 @@ import { getPublishStore as libGetPublishStore } from './section-tools-lib';
     syncSectionToolsUi({
       isInScope: isEntryEditScreen,
       panelStorageKey,
+      getBrief: buildBrief,
+      getBlueprintData,
       actions: {
         onQuote: insertQuoteAsSecondSection,
         onSwap: swapSections2And3,
@@ -108,6 +167,9 @@ import { getPublishStore as libGetPublishStore } from './section-tools-lib';
     console.info('[SectionTools] Statamic.booting fired');
 
     syncButtons();
+
+    // Pre-warm blueprint cache so data is ready before the first AI message.
+    if (isEntryEditScreen()) getBlueprintData();
 
     window.addEventListener('resize', () => {
       persistPanelPositionOnResize(panelStorageKey);
