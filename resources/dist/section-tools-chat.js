@@ -1482,7 +1482,7 @@ export function createChatSection(getBrief, getBlueprintData) {
 
     const prompt =
       'The page sections have been cleared. Build new sections from the document content below.\n' +
-      'Directives in blockquotes ("> [[ SECTION: type ]]") tell you which section type to create next.\n' +
+      'Blockquotes are editor instructions — they describe what to create and how. The content directly below a blockquote is the actual content for that section. Blockquotes may use formal directives ("> [[ SECTION: type ]]") or plain natural language ("Quote section, text below") — treat both as instructions.\n' +
       'Use get_blueprint to learn available set types and field names before adding sections.\n' +
       'GRID FIELDS: some fields (e.g. "rows" in table sections) are grid fields, NOT replicators. ' +
       'Grid fields have no _id per row and cannot use add_item. ' +
