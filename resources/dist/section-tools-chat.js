@@ -2,7 +2,17 @@ import { getPublishStore, uid, getPublishModuleNames, cloneValue, commitField, r
 import { simplifyBlueprintNode, fetchAssetsForAI, extractBlueprintSets, validateSetTypeForField, buildRootFieldMap } from './section-tools-queries.js';
 import { pushUndoSnapshot } from './section-tools-mutations.js';
 
-function injectNestedItemMeta(statamic, rootHandle, parentId, field, newItemId, type) {
+// inlineSubItems:  { fieldHandle: [subItems] } — replicator sub-items to inject in the same commit
+// inlineSubRows:   { fieldHandle: [rows] }     — grid rows to inject in the same commit
+// inlineAssets:    { fieldHandle: [assetObjects] } — pre-fetched asset objects for assets fields.
+//                  Setting meta.data to a truthy array prevents Statamic's initializeAssets from
+//                  calling loadAssets (an async HTTP POST). loadAssets completes after commitField
+//                  and its setMeta callback uses a stale store snapshot, wiping out the meta of
+//                  any item added after this one and crashing the renderer. Pass [] on fetch error
+//                  (still prevents loadAssets; just no preview until the page is reloaded).
+// All three are combined into one setMeta commit to prevent any async re-render window.
+function injectNestedItemMeta(statamic, rootHandle, parentId, field, newItemId, type,
+                              inlineSubItems = {}, inlineSubRows = {}, inlineAssets = {}) {
   const publishStore = getPublishStore(statamic);
   const meta = publishStore?.meta;
   if (!meta) return;
@@ -23,7 +33,38 @@ function injectNestedItemMeta(statamic, rootHandle, parentId, field, newItemId, 
       if (!nestedFieldMeta || typeof nestedFieldMeta !== 'object') return false;
       const typeTemplate = nestedFieldMeta.new?.[type];
       if (!nestedFieldMeta.existing) nestedFieldMeta.existing = {};
-      nestedFieldMeta.existing[newItemId] = typeTemplate ? cloneValue(typeTemplate) : {};
+      const newItemMeta = typeTemplate ? cloneValue(typeTemplate) : {};
+
+      // Inline replicator sub-items (e.g. step items inside a steps tile)
+      for (const [fh, subItems] of Object.entries(inlineSubItems)) {
+        if (!Array.isArray(subItems) || !subItems.length) continue;
+        if (!newItemMeta[fh] || typeof newItemMeta[fh] !== 'object') newItemMeta[fh] = {};
+        const fm = newItemMeta[fh];
+        if (!fm.existing) fm.existing = {};
+        for (const si of subItems) {
+          if (si?._id && !fm.existing[si._id]) fm.existing[si._id] = fm.new?.[si.type] ?? {};
+        }
+      }
+      // Inline grid rows (e.g. icons rows inside an icons tile)
+      for (const [fh, rows] of Object.entries(inlineSubRows)) {
+        if (!Array.isArray(rows) || !rows.length) continue;
+        if (!newItemMeta[fh] || typeof newItemMeta[fh] !== 'object') newItemMeta[fh] = {};
+        const fm = newItemMeta[fh];
+        if (!fm.existing) fm.existing = {};
+        for (const row of rows) {
+          if (row?._id && !fm.existing[row._id]) fm.existing[row._id] = {};
+        }
+      }
+      // Inline assets: set meta.data to the pre-fetched asset objects so Statamic's assets
+      // field skips initializeAssets → loadAssets entirely (it only calls loadAssets when
+      // meta.data is falsy). With meta.data truthy the field uses it directly → previews show.
+      for (const [fh, assetData] of Object.entries(inlineAssets)) {
+        if (!Array.isArray(assetData)) continue;
+        if (!newItemMeta[fh] || typeof newItemMeta[fh] !== 'object') newItemMeta[fh] = {};
+        newItemMeta[fh].data = assetData;
+      }
+
+      nestedFieldMeta.existing[newItemId] = newItemMeta;
       return true;
     }
     for (const itemMeta of Object.values(existingObj)) {
@@ -47,7 +88,8 @@ function injectNestedItemMeta(statamic, rootHandle, parentId, field, newItemId, 
   }
 }
 
-function injectTopLevelItemMeta(statamic, rootHandle, newItemId, type) {
+function injectTopLevelItemMeta(statamic, rootHandle, newItemId, type,
+                               inlineSubItems = {}, inlineSubRows = {}, inlineAssets = {}) {
   const publishStore = getPublishStore(statamic);
   const meta = publishStore?.meta;
   if (!meta) return;
@@ -80,13 +122,43 @@ function injectTopLevelItemMeta(statamic, rootHandle, newItemId, type) {
       : {};
   }
 
+  const newItemMeta = typeTemplate;
+
+  // Inline replicator sub-items (e.g. tab items inside a tabs_numbers section)
+  for (const [fh, subItems] of Object.entries(inlineSubItems)) {
+    if (!Array.isArray(subItems) || !subItems.length) continue;
+    if (!newItemMeta[fh] || typeof newItemMeta[fh] !== 'object') newItemMeta[fh] = {};
+    const fm = newItemMeta[fh];
+    if (!fm.existing) fm.existing = {};
+    for (const si of subItems) {
+      if (si?._id && !fm.existing[si._id]) fm.existing[si._id] = fm.new?.[si.type] ?? {};
+    }
+  }
+  // Inline grid rows (e.g. accordion entries)
+  for (const [fh, rows] of Object.entries(inlineSubRows)) {
+    if (!Array.isArray(rows) || !rows.length) continue;
+    if (!newItemMeta[fh] || typeof newItemMeta[fh] !== 'object') newItemMeta[fh] = {};
+    const fm = newItemMeta[fh];
+    if (!fm.existing) fm.existing = {};
+    for (const row of rows) {
+      if (row?._id && !fm.existing[row._id]) fm.existing[row._id] = {};
+    }
+  }
+  // Inline assets: same fix as nested — set meta.data to pre-fetched objects so loadAssets
+  // is never called and previews display immediately.
+  for (const [fh, assetData] of Object.entries(inlineAssets)) {
+    if (!Array.isArray(assetData)) continue;
+    if (!newItemMeta[fh] || typeof newItemMeta[fh] !== 'object') newItemMeta[fh] = {};
+    newItemMeta[fh].data = assetData;
+  }
+
   const updatedMeta = {
     ...meta,
     [rootHandle]: {
       ...rootFieldMeta,
       existing: {
         ...(rootFieldMeta.existing ?? {}),
-        [newItemId]: typeTemplate,
+        [newItemId]: newItemMeta,
       },
     },
   };
@@ -97,6 +169,23 @@ function injectTopLevelItemMeta(statamic, rootHandle, newItemId, type) {
       statamic.$store.commit(`publish/${moduleName}/setMeta`, updatedMeta);
       statamic.$store.dispatch(`publish/${moduleName}/setMeta`, updatedMeta);
     } catch {}
+  }
+}
+
+// Fetch Statamic asset objects for a list of "assets::path" strings.
+// Returns an array of asset objects (with url, thumbnail, etc.) as returned by
+// Statamic's assets-fieldtype endpoint. Falls back to [] on error.
+// Uses window.Statamic.$axios (already configured with CSRF/cookies) to avoid 419s.
+async function fetchStatamicAssetData(assetPaths) {
+  if (!assetPaths || !assetPaths.length) return [];
+  const axios = window.Statamic?.$axios;
+  if (!axios) return [];
+  const cpRoot = window.Statamic?.$config?.get('cp_root') ?? '/cp';
+  try {
+    const res = await axios.post(`${cpRoot}/assets-fieldtype`, { assets: assetPaths });
+    return Array.isArray(res.data) ? res.data : [];
+  } catch {
+    return [];
   }
 }
 
@@ -205,8 +294,11 @@ function injectNestedReplicatorItemsMeta(statamic, rootHandle, itemId, replicato
       let patched = false;
       for (const [fieldHandle, newItems] of Object.entries(replicatorUpdates)) {
         if (!Array.isArray(newItems) || !newItems.length) continue;
+        // Create field meta entry if the type template didn't include it.
+        if (!itemMeta[fieldHandle] || typeof itemMeta[fieldHandle] !== 'object') {
+          itemMeta[fieldHandle] = {};
+        }
         const fieldMeta = itemMeta[fieldHandle];
-        if (!fieldMeta || typeof fieldMeta !== 'object') continue;
         if (!fieldMeta.existing) fieldMeta.existing = {};
         for (const subItem of newItems) {
           const subId = subItem._id;
@@ -1116,6 +1208,8 @@ async function executeTool(name, input) {
             : {};
           return [k, v.map((row) => normalizeGridRow(row, rowFieldTypes, blueprint))];
         }
+        // Auto-wrap bare asset strings into arrays (assets fields always store arrays).
+        if (fieldTypes[k] === 'assets' && typeof v === 'string') return [k, [v]];
         return [k, v];
       }),
     );
@@ -1125,10 +1219,23 @@ async function executeTool(name, input) {
       const cloned = cloneValue(Array.isArray(values[parent]) ? values[parent] : []);
       insertAfterIdOrAppend(cloned, newItem, after_id);
       pushUndoSnapshot();
-      // Values must be committed first so Vue knows the set type (and can resolve
-      // field configs from the blueprint) when the meta commit triggers re-render.
+      // Inject meta (with all inline sub-items) BEFORE committing values. The new item is not yet
+      // in the values array, so Vue won't render it during the meta commit. When values are then
+      // committed, Vue renders the new item with meta already in place — no crash window.
+      const topInlineReplicators = Object.fromEntries(
+        Object.entries(sanitizedFields).filter(([k, v]) => Array.isArray(v) && fieldTypes[k] === 'replicator')
+      );
+      const topInlineGrids = Object.fromEntries(
+        Object.entries(sanitizedFields).filter(([k, v]) => Array.isArray(v) && fieldTypes[k] === 'grid')
+      );
+      const topAssetFieldEntries = Object.entries(sanitizedFields).filter(([k, v]) => Array.isArray(v) && fieldTypes[k] === 'assets');
+      const topInlineAssets = {};
+      await Promise.all(topAssetFieldEntries.map(async ([fh, paths]) => {
+        topInlineAssets[fh] = await fetchStatamicAssetData(paths);
+      }));
+      injectTopLevelItemMeta(window.Statamic, parent, newItem._id, type,
+        topInlineReplicators, topInlineGrids, topInlineAssets);
       commitField(window.Statamic, parent, cloned);
-      injectTopLevelItemMeta(window.Statamic, parent, newItem._id, type);
       // Push any string field values into CodeMirror after Vue renders — code fieldtypes
       // are uncontrolled and don't watch their value prop in normal (editable) mode.
       if (Object.keys(sanitizedFields).length > 0) {
@@ -1161,23 +1268,25 @@ async function executeTool(name, input) {
         }
       }
       if (addToParentItem(cloned, parent, field, newItem, after_id)) {
-        // Inject meta for the new item before committing values so Vue renders it correctly.
-        injectNestedItemMeta(window.Statamic, rootHandle, parent, field, newItem._id, type);
-        // Inject meta for any inline replicator sub-items (e.g. steps passed inline via add_item).
-        // injectNestedItemMeta sets up the tile's meta with empty .existing; we now populate it.
+        // Inject meta for the new item and all inline sub-items in a single setMeta commit,
+        // preventing a race condition where loadAssets re-renders between two separate commits.
         const inlineReplicators = Object.fromEntries(
           Object.entries(sanitizedFields).filter(([k, v]) => Array.isArray(v) && fieldTypes[k] === 'replicator')
         );
-        if (Object.keys(inlineReplicators).length) {
-          injectNestedReplicatorItemsMeta(window.Statamic, rootHandle, newItem._id, inlineReplicators);
-        }
-        // Inject meta for any inline grid rows (e.g. rows passed directly in add_item fields).
         const inlineGrids = Object.fromEntries(
           Object.entries(sanitizedFields).filter(([k, v]) => Array.isArray(v) && fieldTypes[k] === 'grid')
         );
-        if (Object.keys(inlineGrids).length) {
-          injectNestedGridRowsMeta(window.Statamic, rootHandle, newItem._id, inlineGrids);
-        }
+        // Fetch real asset objects before injecting meta. Pre-populating meta.data with the
+        // fetched objects prevents Statamic's initializeAssets from calling loadAssets (async).
+        // loadAssets would otherwise fire and, when complete, commit setMeta with a stale store
+        // snapshot that wipes out meta for any item added after this one, causing a render crash.
+        const assetFieldEntries = Object.entries(sanitizedFields).filter(([k, v]) => Array.isArray(v) && fieldTypes[k] === 'assets');
+        const inlineAssets = {};
+        await Promise.all(assetFieldEntries.map(async ([fh, paths]) => {
+          inlineAssets[fh] = await fetchStatamicAssetData(paths);
+        }));
+        injectNestedItemMeta(window.Statamic, rootHandle, parent, field, newItem._id, type,
+          inlineReplicators, inlineGrids, inlineAssets);
         pushUndoSnapshot();
         commitField(window.Statamic, rootHandle, cloned);
         return skippedBard.length
@@ -1899,10 +2008,7 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
       ? customText.slice(0, 120) + '…'
       : text;
 
-    // Document builds get cache_control so the large content is cached in subsequent rounds
-    const userContent = customText
-      ? [{ type: 'text', text, cache_control: { type: 'ephemeral' } }]
-      : text;
+    const userContent = customText ? [{ type: 'text', text }] : text;
     messages.push({ role: 'user', content: userContent });
     appendMessage(history, 'user', displayText);
 

@@ -95,6 +95,15 @@ class ServiceProvider extends AddonServiceProvider
                         // Expand the raw field list: inline entries stay as-is, while
                         // `import: fieldset_handle` entries are replaced by the raw field
                         // configs from that fieldset so the loop below handles them uniformly.
+                        // NOTE: Only one level of imports is expanded here. If an imported
+                        // fieldset itself contains `import:` directives, those inner imports
+                        // still have no `handle` and will be skipped by the loop below.
+                        // Recursive import expansion is not implemented but may be needed
+                        // if blueprints grow deeper import chains.
+                        //
+                        // The loop also handles the `field: "fieldset_handle.field_handle"`
+                        // single-field reference pattern (case b), which is already resolved
+                        // by the code below using Fieldset::find(). Both patterns are covered.
                         $expandedFieldConfigs = [];
                         foreach ($config['fields'] ?? [] as $fc) {
                             if (!isset($fc['handle']) && !empty($fc['import'])) {
