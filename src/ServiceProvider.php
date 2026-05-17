@@ -92,7 +92,23 @@ class ServiceProvider extends AddonServiceProvider
 
                         // Set type: { display, fields: [...] }
                         $setFields = [];
-                        foreach ($config['fields'] ?? [] as $fieldConfig) {
+                        // Expand the raw field list: inline entries stay as-is, while
+                        // `import: fieldset_handle` entries are replaced by the raw field
+                        // configs from that fieldset so the loop below handles them uniformly.
+                        $expandedFieldConfigs = [];
+                        foreach ($config['fields'] ?? [] as $fc) {
+                            if (!isset($fc['handle']) && !empty($fc['import'])) {
+                                $importFs = \Statamic\Facades\Fieldset::find($fc['import']);
+                                if ($importFs) {
+                                    foreach ($importFs->contents()['fields'] ?? [] as $ifc) {
+                                        $expandedFieldConfigs[] = $ifc;
+                                    }
+                                }
+                            } else {
+                                $expandedFieldConfigs[] = $fc;
+                            }
+                        }
+                        foreach ($expandedFieldConfigs as $fieldConfig) {
                             $fieldHandle = $fieldConfig['handle'] ?? null;
                             if (!$fieldHandle) continue;
 
@@ -124,6 +140,34 @@ class ServiceProvider extends AddonServiceProvider
                             if (!empty($fieldDef['character_limit']))          $slim['character_limit'] = $fieldDef['character_limit'];
                             if (in_array($fieldType, $OPTION_TYPES, true) && !empty($fieldDef['options'])) {
                                 $slim['options'] = $fieldDef['options'];
+                            }
+                            // Include sub-field types for grid fields so the JS normalizer can
+                            // coerce bard/assets values within grid rows correctly.
+                            if ($fieldType === 'grid' && !empty($fieldDef['fields'])) {
+                                $gridSubFields = [];
+                                foreach ($fieldDef['fields'] as $gfc) {
+                                    $gfHandle = $gfc['handle'] ?? null;
+                                    if (!$gfHandle) continue;
+                                    $gfRef = $gfc['field'] ?? null;
+                                    if (is_array($gfRef)) {
+                                        $gfDef = $gfRef;
+                                    } elseif (is_string($gfRef) && str_contains($gfRef, '.')) {
+                                        [$gFsHandle, $gFsFieldHandle] = explode('.', $gfRef, 2);
+                                        $gFs = \Statamic\Facades\Fieldset::find($gFsHandle);
+                                        $gResolved = $gFs?->fields()->all()[$gFsFieldHandle] ?? null;
+                                        $gfDef = $gResolved ? array_merge(
+                                            ['type' => $gResolved->type(), 'display' => $gResolved->display()],
+                                            $gResolved->config()
+                                        ) : $gfc;
+                                    } else {
+                                        $gfDef = $gfc;
+                                    }
+                                    $gfType = $gfDef['type'] ?? '';
+                                    $gfSlim = ['handle' => $gfHandle];
+                                    if ($gfType) $gfSlim['type'] = $gfType;
+                                    $gridSubFields[] = $gfSlim;
+                                }
+                                if ($gridSubFields) $slim['fields'] = $gridSubFields;
                             }
                             $setFields[] = $slim;
 

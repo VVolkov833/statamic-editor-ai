@@ -8,39 +8,41 @@ function injectNestedItemMeta(statamic, rootHandle, parentId, field, newItemId, 
   if (!meta) return;
 
   const rootFieldMeta = meta[rootHandle];
-  if (!rootFieldMeta?.existing?.[parentId]) return;
+  if (!rootFieldMeta) return;
 
-  const parentMeta = rootFieldMeta.existing[parentId];
-  const nestedFieldMeta = parentMeta[field];
-  if (!nestedFieldMeta) return;
+  // Deep-clone so we can mutate safely, then recursively search for parentId at any depth.
+  const newMeta = cloneValue(meta);
+  const newRootFieldMeta = newMeta[rootHandle];
 
-  const typeTemplate = nestedFieldMeta?.new?.[type];
+  function findAndInject(existingObj) {
+    if (!existingObj || typeof existingObj !== 'object') return false;
+    if (parentId in existingObj) {
+      const parentMeta = existingObj[parentId];
+      if (!parentMeta || typeof parentMeta !== 'object') return false;
+      const nestedFieldMeta = parentMeta[field];
+      if (!nestedFieldMeta || typeof nestedFieldMeta !== 'object') return false;
+      const typeTemplate = nestedFieldMeta.new?.[type];
+      if (!nestedFieldMeta.existing) nestedFieldMeta.existing = {};
+      nestedFieldMeta.existing[newItemId] = typeTemplate ? cloneValue(typeTemplate) : {};
+      return true;
+    }
+    for (const itemMeta of Object.values(existingObj)) {
+      if (!itemMeta || typeof itemMeta !== 'object') continue;
+      for (const fieldMeta of Object.values(itemMeta)) {
+        if (!fieldMeta || typeof fieldMeta !== 'object' || !fieldMeta.existing) continue;
+        if (findAndInject(fieldMeta.existing)) return true;
+      }
+    }
+    return false;
+  }
 
-  const updatedMeta = {
-    ...meta,
-    [rootHandle]: {
-      ...rootFieldMeta,
-      existing: {
-        ...rootFieldMeta.existing,
-        [parentId]: {
-          ...parentMeta,
-          [field]: {
-            ...nestedFieldMeta,
-            existing: {
-              ...(nestedFieldMeta.existing ?? {}),
-              [newItemId]: typeTemplate ? cloneValue(typeTemplate) : {},
-            },
-          },
-        },
-      },
-    },
-  };
+  if (!findAndInject(newRootFieldMeta.existing)) return;
 
   const moduleNames = getPublishModuleNames(statamic);
   for (const moduleName of moduleNames) {
     try {
-      statamic.$store.commit(`publish/${moduleName}/setMeta`, updatedMeta);
-      statamic.$store.dispatch(`publish/${moduleName}/setMeta`, updatedMeta);
+      statamic.$store.commit(`publish/${moduleName}/setMeta`, newMeta);
+      statamic.$store.dispatch(`publish/${moduleName}/setMeta`, newMeta);
     } catch {}
   }
 }
@@ -175,6 +177,124 @@ function injectBardSetsMeta(statamic, rootHandle, itemId, bardFieldUpdates) {
     try {
       statamic.$store.commit(`publish/${moduleName}/setMeta`, updatedMeta);
       statamic.$store.dispatch(`publish/${moduleName}/setMeta`, updatedMeta);
+    } catch {}
+  }
+}
+
+// After update_item writes replicator sub-items (e.g., steps inside a steps tile), the
+// Vuex meta for those items is missing — Statamic's renderer accesses meta.existing[id]
+// which is undefined, causing "Cannot read properties of undefined (reading '<handle>')".
+// This function searches the nested meta hierarchy for the parent item and injects
+// existing-item meta entries for each new sub-item in the updated replicator fields.
+function injectNestedReplicatorItemsMeta(statamic, rootHandle, itemId, replicatorUpdates) {
+  const publishStore = getPublishStore(statamic);
+  const meta = publishStore?.meta;
+  if (!meta) return;
+
+  const rootFieldMeta = meta[rootHandle];
+  if (!rootFieldMeta) return;
+
+  const newMeta = cloneValue(meta);
+  const newRootFieldMeta = newMeta[rootHandle];
+
+  function findAndPatch(existingObj) {
+    if (!existingObj || typeof existingObj !== 'object') return false;
+    if (itemId in existingObj) {
+      const itemMeta = existingObj[itemId];
+      if (!itemMeta || typeof itemMeta !== 'object') return false;
+      let patched = false;
+      for (const [fieldHandle, newItems] of Object.entries(replicatorUpdates)) {
+        if (!Array.isArray(newItems) || !newItems.length) continue;
+        const fieldMeta = itemMeta[fieldHandle];
+        if (!fieldMeta || typeof fieldMeta !== 'object') continue;
+        if (!fieldMeta.existing) fieldMeta.existing = {};
+        for (const subItem of newItems) {
+          const subId = subItem._id;
+          if (!subId || fieldMeta.existing[subId]) continue;
+          fieldMeta.existing[subId] = cloneValue(fieldMeta.new?.[subItem.type] ?? {});
+          patched = true;
+        }
+      }
+      return patched;
+    }
+    for (const itemMeta of Object.values(existingObj)) {
+      if (!itemMeta || typeof itemMeta !== 'object') continue;
+      for (const fieldMeta of Object.values(itemMeta)) {
+        if (!fieldMeta || typeof fieldMeta !== 'object' || !fieldMeta.existing) continue;
+        if (findAndPatch(fieldMeta.existing)) return true;
+      }
+    }
+    return false;
+  }
+
+  if (!findAndPatch(newRootFieldMeta.existing)) return;
+
+  const moduleNames = getPublishModuleNames(statamic);
+  for (const moduleName of moduleNames) {
+    try {
+      statamic.$store.commit(`publish/${moduleName}/setMeta`, newMeta);
+      statamic.$store.dispatch(`publish/${moduleName}/setMeta`, newMeta);
+    } catch {}
+  }
+}
+
+// After update_item writes grid rows (e.g., icons grid on an icons tile, rows grid within
+// table sections), Statamic's renderer accesses meta.existing[row._id] for each row.
+// Without _id on the row and a matching entry in existing, $.meta is undefined and the
+// renderer crashes with "Cannot read properties of undefined (reading '<fieldHandle>')".
+// This function recursively searches the nested meta hierarchy for the parent item and
+// injects existing entries for each new grid row.
+function injectNestedGridRowsMeta(statamic, rootHandle, itemId, gridUpdates) {
+  const publishStore = getPublishStore(statamic);
+  const meta = publishStore?.meta;
+  if (!meta) return;
+
+  const rootFieldMeta = meta[rootHandle];
+  if (!rootFieldMeta) return;
+
+  const newMeta = cloneValue(meta);
+  const newRootFieldMeta = newMeta[rootHandle];
+
+  function findAndPatch(existingObj) {
+    if (!existingObj || typeof existingObj !== 'object') return false;
+    if (itemId in existingObj) {
+      const itemMeta = existingObj[itemId];
+      if (!itemMeta || typeof itemMeta !== 'object') return false;
+      let patched = false;
+      for (const [fieldHandle, newRows] of Object.entries(gridUpdates)) {
+        if (!Array.isArray(newRows) || !newRows.length) continue;
+        // Create field meta if the item meta template didn't include it (e.g. empty {} from new-item template).
+        if (!itemMeta[fieldHandle] || typeof itemMeta[fieldHandle] !== 'object') {
+          itemMeta[fieldHandle] = {};
+        }
+        const fieldMeta = itemMeta[fieldHandle];
+        if (!fieldMeta.existing) fieldMeta.existing = {};
+        for (const row of newRows) {
+          const rowId = row._id;
+          if (!rowId || fieldMeta.existing[rowId]) continue;
+          fieldMeta.existing[rowId] = {};
+          patched = true;
+        }
+      }
+      return patched;
+    }
+    for (const itemMeta of Object.values(existingObj)) {
+      if (!itemMeta || typeof itemMeta !== 'object') continue;
+      for (const fieldMeta of Object.values(itemMeta)) {
+        if (!fieldMeta || typeof fieldMeta !== 'object' || !fieldMeta.existing) continue;
+        if (findAndPatch(fieldMeta.existing)) return true;
+      }
+    }
+    return false;
+  }
+
+  if (!findAndPatch(newRootFieldMeta.existing)) return;
+
+  const moduleNames = getPublishModuleNames(statamic);
+  for (const moduleName of moduleNames) {
+    try {
+      statamic.$store.commit(`publish/${moduleName}/setMeta`, newMeta);
+      statamic.$store.dispatch(`publish/${moduleName}/setMeta`, newMeta);
     } catch {}
   }
 }
@@ -632,6 +752,40 @@ const AI_TOOLS = [
   },
 ];
 
+// Normalize a single grid row: add _id, wrap bare asset strings, and coerce bard field values.
+// rowFieldTypes maps field handles to their Statamic type (e.g. {label:"text", text:"bard"}).
+// blueprint is the Vuex blueprint object used by sanitizeBardContent.
+function normalizeGridRow(row, rowFieldTypes, blueprint) {
+  if (!row || typeof row !== 'object') return row;
+  const r = { ...row };
+  if (!r._id) r._id = uid();
+  for (const [rk, rv] of Object.entries(r)) {
+    if (rk === '_id') continue;
+    const rft = rowFieldTypes?.[rk];
+    if (rft === 'bard') {
+      if (typeof rv === 'string' && rv.trim()) {
+        r[rk] = [{ type: 'paragraph', content: [{ type: 'text', text: rv }] }];
+      } else if (Array.isArray(rv)) {
+        const sanitized = sanitizeBardContent(rv, blueprint);
+        const hasBlocks = sanitized.some(n => n && typeof n === 'object' && BARD_BLOCK_TYPES.has(n.type));
+        if (!hasBlocks && sanitized.length > 0) {
+          const inlines = sanitized.filter(n => n && typeof n === 'object' && n.type === 'text' && n.text);
+          r[rk] = inlines.length > 0 ? [{ type: 'paragraph', content: inlines }] : [];
+        } else {
+          r[rk] = sanitized;
+        }
+      } else if (!rv) {
+        r[rk] = [];
+      }
+    } else if (typeof rv === 'string' && rv.startsWith('assets::')) {
+      r[rk] = [rv];
+    } else if (rft === 'assets' && typeof rv === 'string') {
+      r[rk] = [rv];
+    }
+  }
+  return r;
+}
+
 async function executeTool(name, input) {
   if (name === 'get_field') {
     const values = getPublishStore(window.Statamic)?.values;
@@ -671,19 +825,24 @@ async function executeTool(name, input) {
     // Resolve the target item's set type so we can coerce fields to their declared types.
     // Prefer the endpoint blueprint (fully resolves imported fieldsets) over Vuex-derived.
     let itemFieldTypes = {};
+    let resolvedSetType = null;
+    // Use the endpoint blueprint (fully resolves imported fieldsets); fall back to Vuex-derived.
+    const cachedSetsSnapshot = (() => {
+      const ep = blueprintDataProvider?.()?.sets ?? {};
+      return Object.keys(ep).length > 0 ? ep : extractBlueprintSets(blueprint);
+    })();
     for (const rootValue of Object.values(values)) {
       if (!Array.isArray(rootValue)) continue;
       const found = findItemWithParent(cloneValue(rootValue), input.id);
       if (found?.item?.type) {
-        const setType = found.item.type;
-        const cachedSets = blueprintDataProvider?.()?.sets ?? {};
-        const cachedFields = cachedSets[setType]?.fields;
+        resolvedSetType = found.item.type;
+        const cachedFields = cachedSetsSnapshot[resolvedSetType]?.fields;
         if (cachedFields) {
           itemFieldTypes = Object.fromEntries(
             cachedFields.filter(f => f.handle && f.type).map(f => [f.handle, f.type])
           );
         } else {
-          itemFieldTypes = getSetFieldTypes(blueprint, setType);
+          itemFieldTypes = getSetFieldTypes(blueprint, resolvedSetType);
         }
         break;
       }
@@ -696,24 +855,145 @@ async function executeTool(name, input) {
         return { error: `Field "${k}" is a ${itemFieldTypes[k]} field — value must be a plain option key string (e.g. "certificates_shortest"), never an object or array. Got: ${JSON.stringify(v)}` };
       }
     }
-    const bardFieldUpdates = {};
-    const normalizedFields = Object.fromEntries(
-      Object.entries(input.fields).map(([k, v]) => {
-        // Auto-convert bard arrays to plain text for fields declared as plain-string types.
-        if (STRING_TYPES.has(itemFieldTypes[k]) && Array.isArray(v)) {
-          return [k, bardArrayToPlainText(v)];
+    // Extract a heading node's text from a bard array (returns '' if no heading at position 0).
+    const extractBardHeading = (bardArr) => {
+      if (!Array.isArray(bardArr) || bardArr[0]?.type !== 'heading') return '';
+      return (bardArr[0]?.content ?? []).map(n => n.text ?? '').join('');
+    };
+    // Coerce a single field value: bard→string for textarea, asset string→array, etc.
+    // siblingTypes: {fieldHandle: type} of all fields in the same set, used for heading extraction.
+    const coerceFieldValue = (fk, fv, fieldType, siblingTypes, siblingValues) => {
+      if (STRING_TYPES.has(fieldType) && Array.isArray(fv)) {
+        // When a textarea bard array starts with a heading, extract it as the sibling 'title' field
+        // (if title exists in the set, isn't already set, and the caller hasn't supplied it).
+        if (fk !== 'title' && STRING_TYPES.has(siblingTypes?.title) && !siblingValues?.title) {
+          const heading = extractBardHeading(fv);
+          if (heading) {
+            siblingValues.title = heading; // mutate caller's accumulator
+            return bardArrayToPlainText(fv.slice(1));
+          }
         }
-        const sanitized = sanitizeBardContent(v, blueprint);
-        // Track bard field updates so we can inject meta for nested bard set nodes.
-        if (itemFieldTypes[k] === 'bard' && Array.isArray(sanitized)) bardFieldUpdates[k] = sanitized;
-        return [k, sanitized];
-      }),
-    );
+        return bardArrayToPlainText(fv);
+      }
+      if (fieldType === 'assets' && typeof fv === 'string') return [fv];
+      return fv; // leave unknown types as-is (caller handles bard/grid separately)
+    };
+    // Normalize a replicator sub-item array: infer missing type, coerce textarea→string, asset string→array.
+    const normalizeSubItems = (items, parentSetType) => {
+      if (!Array.isArray(items)) return items;
+      const childSets = Object.values(cachedSetsSnapshot).filter(s => s._parent_set === parentSetType);
+      const singleChildType = childSets.length === 1 ? childSets[0].handle : null;
+      return items.map(item => {
+        if (!item || typeof item !== 'object') return item;
+        const resolvedType = item.type ?? singleChildType;
+        if (!resolvedType) return { _id: item._id ?? uid(), enabled: item.enabled ?? true, ...item };
+        const setDef = cachedSetsSnapshot[resolvedType];
+        const setFieldTypes = setDef?.fields
+          ? Object.fromEntries(setDef.fields.filter(f => f.handle && f.type).map(f => [f.handle, f.type]))
+          : {};
+        // Inject _id and enabled so Statamic's replicator component can look up meta
+        // correctly. Without _id, meta.existing[undefined] = undefined → render crash.
+        const _id = item._id ?? uid();
+        const enabled = item.enabled ?? true;
+        const out = { ...item, _id, enabled, type: resolvedType };
+        // Rename common field-name aliases the AI uses (e.g. "headline" when the set has "title").
+        const ALIASES = [['headline', 'title'], ['title', 'headline']];
+        for (const [wrong, correct] of ALIASES) {
+          if (out[wrong] !== undefined && !setFieldTypes[wrong] && setFieldTypes[correct] && out[correct] === undefined) {
+            out[correct] = out[wrong];
+            delete out[wrong];
+          }
+        }
+        for (const [fk, fv] of Object.entries(out)) {
+          if (fk === 'type' || fk === '_id' || fk === 'enabled') continue;
+          const ft = setFieldTypes[fk];
+          if (!ft) continue;
+          // Grid sub-fields: normalize each row (add _id, coerce bard/assets values).
+          if (ft === 'grid' && Array.isArray(fv)) {
+            const gridFieldDef = setDef?.fields?.find(f => f.handle === fk);
+            const rowFieldTypes = gridFieldDef?.fields
+              ? Object.fromEntries(gridFieldDef.fields.filter(f => f.handle && f.type).map(f => [f.handle, f.type]))
+              : {};
+            out[fk] = fv.map(row => normalizeGridRow(row, rowFieldTypes));
+            continue;
+          }
+          out[fk] = coerceFieldValue(fk, fv, ft, setFieldTypes, out);
+        }
+        return out;
+      });
+    };
+    const bardFieldUpdates = {};
+    // Use an accumulator (not map) so coerceFieldValue can inject extracted fields (e.g. title from heading).
+    const normalizedFields = {};
+    // Common field-name aliases the AI uses (e.g. "headline" when the blueprint field is "title").
+    const FIELD_ALIASES = { headline: 'title', title: 'headline' };
+    for (const [k, v] of Object.entries(input.fields)) {
+      // Resolve alias: if the field name isn't in the item's set but its alias is, redirect the write.
+      const alias = !itemFieldTypes[k] && FIELD_ALIASES[k] && itemFieldTypes[FIELD_ALIASES[k]] ? FIELD_ALIASES[k] : null;
+      const effectiveKey = alias ?? k;
+      const effectiveType = itemFieldTypes[effectiveKey];
+      // Auto-convert bard arrays to plain text for fields declared as plain-string types.
+      if (STRING_TYPES.has(effectiveType) && Array.isArray(v)) {
+        normalizedFields[effectiveKey] = coerceFieldValue(effectiveKey, v, effectiveType, itemFieldTypes, normalizedFields);
+        continue;
+      }
+      // Normalize replicator sub-items: infer type, coerce textarea→string, asset string→array.
+      if (effectiveType === 'replicator' && Array.isArray(v) && resolvedSetType) {
+        normalizedFields[effectiveKey] = normalizeSubItems(v, resolvedSetType);
+        continue;
+      }
+      // Grid rows: normalize each row (add _id, coerce bard/assets values).
+      if (effectiveType === 'grid' && Array.isArray(v)) {
+        const gridFieldDef = cachedSetsSnapshot[resolvedSetType]?.fields?.find(f => f.handle === effectiveKey);
+        const rowFieldTypes = gridFieldDef?.fields
+          ? Object.fromEntries(gridFieldDef.fields.filter(f => f.handle && f.type).map(f => [f.handle, f.type]))
+          : {};
+        normalizedFields[effectiveKey] = v.map(row => normalizeGridRow(row, rowFieldTypes));
+        continue;
+      }
+      const sanitized = sanitizeBardContent(v, blueprint);
+      // Track bard field updates so we can inject meta for nested bard set nodes.
+      if (effectiveType === 'bard' && Array.isArray(sanitized)) bardFieldUpdates[effectiveKey] = sanitized;
+      normalizedFields[effectiveKey] = sanitized;
+    }
     for (const [rootHandle, rootValue] of Object.entries(values)) {
       if (!Array.isArray(rootValue)) continue;
       const cloned = cloneValue(rootValue);
       const type = patchItemInArray(cloned, input.id, normalizedFields);
       if (type !== false) {
+        // Inject meta for new replicator sub-items BEFORE commitField so Vue doesn't
+        // crash on first render trying to access meta.existing[id] = undefined.
+        const replicatorUpdates = Object.fromEntries(
+          Object.entries(normalizedFields).filter(([k, v]) => itemFieldTypes[k] === 'replicator' && Array.isArray(v))
+        );
+        if (Object.keys(replicatorUpdates).length) {
+          injectNestedReplicatorItemsMeta(window.Statamic, rootHandle, input.id, replicatorUpdates);
+          // For each replicator sub-item, also inject meta for any nested grid rows
+          // (e.g., rows grid inside section items of a table replicator).
+          for (const repItems of Object.values(replicatorUpdates)) {
+            for (const repItem of repItems) {
+              if (!repItem?._id) continue;
+              const itemSetDef = cachedSetsSnapshot[repItem.type];
+              const nestedGridUpdates = {};
+              for (const [fk, fv] of Object.entries(repItem)) {
+                if (!Array.isArray(fv) || !fv.length) continue;
+                const fieldDef = itemSetDef?.fields?.find(f => f.handle === fk);
+                if (fieldDef?.type !== 'grid') continue;
+                nestedGridUpdates[fk] = fv;
+              }
+              if (Object.keys(nestedGridUpdates).length) {
+                injectNestedGridRowsMeta(window.Statamic, rootHandle, repItem._id, nestedGridUpdates);
+              }
+            }
+          }
+        }
+        // Inject meta for new grid rows on the item itself (e.g., icons grid on an icons tile).
+        const gridUpdates = Object.fromEntries(
+          Object.entries(normalizedFields).filter(([k, v]) => itemFieldTypes[k] === 'grid' && Array.isArray(v))
+        );
+        if (Object.keys(gridUpdates).length) {
+          injectNestedGridRowsMeta(window.Statamic, rootHandle, input.id, gridUpdates);
+        }
         pushUndoSnapshot();
         commitField(window.Statamic, rootHandle, cloned);
         if (Object.keys(bardFieldUpdates).length) {
@@ -780,17 +1060,45 @@ async function executeTool(name, input) {
     );
     const fieldTypes = { ...vuexFieldTypes, ...endpointFieldTypes }; // endpoint wins
     const STRING_FIELD_TYPES = new Set(['textarea', 'text', 'slug', 'markdown']);
-    const REPLICATOR_FIELD_TYPES = new Set(['replicator', 'grid']);
     const SELECT_FIELD_TYPES = new Set(['select', 'radio', 'button_group']);
     for (const [k, v] of Object.entries(fields)) {
       if (SELECT_FIELD_TYPES.has(fieldTypes[k]) && v !== null && typeof v !== 'string') {
         return { error: `Field "${k}" is a ${fieldTypes[k]} field — value must be a plain option key string, never an object or array. Got: ${JSON.stringify(v)}` };
       }
     }
+    // Build a snapshot of all set definitions so replicator sub-items can have type inferred.
+    const allSetsForAdd = hasCached ? cachedSets : extractBlueprintSets(blueprint);
+    // Normalize a single replicator sub-item: infer missing type, fix headline↔title alias,
+    // coerce string fields, wrap bare asset strings in arrays.
+    const normalizeAddSubItem = (item, parentSetType) => {
+      if (!item || typeof item !== 'object') return item;
+      const childSets = Object.values(allSetsForAdd).filter((s) => s._parent_set === parentSetType);
+      const singleChildType = childSets.length === 1 ? childSets[0].handle : null;
+      const resolvedType = item.type ?? singleChildType;
+      if (!resolvedType) return { _id: uid(), enabled: true, ...item };
+      const setDef = allSetsForAdd[resolvedType];
+      const setFTypes = setDef?.fields
+        ? Object.fromEntries(setDef.fields.filter((f) => f.handle && f.type).map((f) => [f.handle, f.type]))
+        : {};
+      const out = { _id: uid(), enabled: true, ...item, type: resolvedType };
+      for (const [wrong, correct] of [['headline', 'title'], ['title', 'headline']]) {
+        if (out[wrong] !== undefined && !setFTypes[wrong] && setFTypes[correct] && out[correct] === undefined) {
+          out[correct] = out[wrong]; delete out[wrong];
+        }
+      }
+      for (const [fk, fv] of Object.entries(out)) {
+        if (fk === 'type' || fk === '_id' || fk === 'enabled') continue;
+        const ft = setFTypes[fk];
+        if (!ft) continue;
+        if (STRING_FIELD_TYPES.has(ft) && Array.isArray(fv)) out[fk] = bardArrayToPlainText(fv);
+        else if (ft === 'assets' && typeof fv === 'string') out[fk] = [fv];
+      }
+      return out;
+    };
     // Bard fields are stripped — Statamic must initialize new items before bard content
     // can be set. Use update_item after creation to populate bard fields.
     // String-type fields that receive a bard array are auto-converted to plain text.
-    // Replicator/grid arrays get _id+enabled injected into sub-items.
+    // Replicator sub-items get type inferred + field coercion. Grid rows get asset strings wrapped.
     const skippedBard = [];
     const sanitizedFields = Object.fromEntries(
       Object.entries(fields).filter(([k, v]) => {
@@ -798,7 +1106,16 @@ async function executeTool(name, input) {
         return true;
       }).map(([k, v]) => {
         if (STRING_FIELD_TYPES.has(fieldTypes[k]) && Array.isArray(v)) return [k, bardArrayToPlainText(v)];
-        if (Array.isArray(v) && REPLICATOR_FIELD_TYPES.has(fieldTypes[k])) return [k, injectReplicatorItemIds(v)];
+        if (Array.isArray(v) && fieldTypes[k] === 'replicator') {
+          return [k, v.map((item) => normalizeAddSubItem(item, type))];
+        }
+        if (Array.isArray(v) && fieldTypes[k] === 'grid') {
+          const gridFieldDef = allSetsForAdd[type]?.fields?.find(f => f.handle === k);
+          const rowFieldTypes = gridFieldDef?.fields
+            ? Object.fromEntries(gridFieldDef.fields.filter(f => f.handle && f.type).map(f => [f.handle, f.type]))
+            : {};
+          return [k, v.map((row) => normalizeGridRow(row, rowFieldTypes, blueprint))];
+        }
         return [k, v];
       }),
     );
@@ -846,6 +1163,21 @@ async function executeTool(name, input) {
       if (addToParentItem(cloned, parent, field, newItem, after_id)) {
         // Inject meta for the new item before committing values so Vue renders it correctly.
         injectNestedItemMeta(window.Statamic, rootHandle, parent, field, newItem._id, type);
+        // Inject meta for any inline replicator sub-items (e.g. steps passed inline via add_item).
+        // injectNestedItemMeta sets up the tile's meta with empty .existing; we now populate it.
+        const inlineReplicators = Object.fromEntries(
+          Object.entries(sanitizedFields).filter(([k, v]) => Array.isArray(v) && fieldTypes[k] === 'replicator')
+        );
+        if (Object.keys(inlineReplicators).length) {
+          injectNestedReplicatorItemsMeta(window.Statamic, rootHandle, newItem._id, inlineReplicators);
+        }
+        // Inject meta for any inline grid rows (e.g. rows passed directly in add_item fields).
+        const inlineGrids = Object.fromEntries(
+          Object.entries(sanitizedFields).filter(([k, v]) => Array.isArray(v) && fieldTypes[k] === 'grid')
+        );
+        if (Object.keys(inlineGrids).length) {
+          injectNestedGridRowsMeta(window.Statamic, rootHandle, newItem._id, inlineGrids);
+        }
         pushUndoSnapshot();
         commitField(window.Statamic, rootHandle, cloned);
         return skippedBard.length
@@ -1113,11 +1445,11 @@ BRIEF: The brief is rebuilt after every write operation and always reflects curr
 HIERARCHY: The word "section" always means a top-level entry in the sections (or equivalent) array. Items nested inside a section (tiles, accordion items, etc.) are sub-items — not sections themselves. When looking for a section by type, only consider top-level entries.
 READING: The brief contains every item's _id, type, and key content. Do NOT call get_item before delete, move, or update_item — derive the _id from the brief. Only call get_item when you need full raw data not in the brief (e.g. complete ProseMirror nodes of a bard field you intend to edit).
 UPDATING: update_item patches any item at any depth by _id. To update a tile, accordion item, or any nested item, use its own _id directly — no need to reconstruct the parent array. For top-level scalar fields (title, date, slug, etc.) use update_field.
-ADDING: add_item takes parent + type. For top-level items use the root field handle as parent — call get_blueprint first and read the _root_field value on the set type you want (e.g. schema_set has _root_field:"schema", not "sections"). For nested items (e.g. a tile inside a section) use the parent item's _id as parent and set field to the replicator field name (e.g. "tiles"). The optional fields parameter is for scalar values (text, numbers, asset strings). If you pre-populate a nested replicator array via fields (e.g. fields.icons), every sub-item in that array MUST include "type" (the set handle from the blueprint) — _id and enabled are injected automatically.
+ADDING: add_item takes parent + type. For top-level items use the root field handle as parent — call get_blueprint first and read the _root_field value on the set type you want (e.g. schema_set has _root_field:"schema", not "sections"). For nested items (e.g. a tile inside a section) use the parent item's _id as parent and set field to the replicator field name (e.g. "tiles"). The optional fields parameter is for scalar values (text, numbers, asset strings). If you pre-populate a nested replicator array via fields (e.g. fields.steps), every sub-item in that array MUST include "type" (the set handle from the blueprint) — _id and enabled are injected automatically. The same rule applies when using update_item to set a replicator field: every item in the array must include "type". Example: update_item(id, {steps:[{type:"step",title:"...",text:"..."},...]}). Omitting "type" causes silent render errors in the editor.
 BARD FIELDS use ProseMirror JSON. Bard fields cannot be set during add_item — they are always initialized empty. If you pass bard content in add_item fields, the response will include "set_bard_fields" listing the skipped fields; immediately follow up with update_item calls (in parallel) to set those fields. For existing items, always call get_item first to read the current structure before editing. ProseMirror rules: text leaf nodes are {"type":"text","text":"..."} (never "value"); paragraphs are {"type":"paragraph","content":[{"type":"text","text":"..."}]}; headings are {"type":"heading","attrs":{"level":2,"textAlign":"left"},"content":[...]}; bard set nodes use {"type":"set","attrs":{"id":"...","values":{...}}} where values holds the set fields. IMAGES in bard: never use {"type":"image",...} inline nodes — that TipTap extension is not active. Embed images as bard sets: {"type":"set","attrs":{"id":"...","values":{"type":"image","enabled":true,"image":["assets::path/to/file.jpg"]}}}.
-ASSET FIELDS store values as "assets::path/to/file.jpg" strings (with the assets:: prefix). Always include this prefix when setting an asset field. Always call search_assets to verify an asset path before using it — even when the document provides a complete path. Use the provided path as the query. Once confirmed (matched_by="path", "filename", or "folder"), use the result path from the response. If the search returns no results, try a shorter part of the path or just the filename.
-GRID FIELDS (e.g. "rows" in a table group, "entries" in an accordion section, "icons" in some tile types) are flat arrays — each row has no _id and cannot use add_item. To populate a grid field use update_item on the parent item with the full array value. Example for table rows: update_item(groupId, {rows:[{label:"Label text",text:[{type:"paragraph",content:[{type:"text",text:"Value text"}]}]}, ...]}). Example for accordion: update_item(accordionId, {headline:"Title",entries:[{title:"Question?",text:[{type:"paragraph",content:[{type:"text",text:"Answer."}]}]}, ...]}).
-TEXTAREA FIELDS are plain strings. If get_blueprint shows a field with type "textarea" or "text" (input), always set it to a plain string — never pass an array or ProseMirror object.
+ASSET FIELDS always store values as arrays of "assets::..." strings — even when max_files is 1. Example: ["assets::praxis/image.jpg"]. Always include the assets:: prefix on each string. When using add_item fields for a top-level asset field you may pass a bare string and it will be auto-wrapped; but when setting an asset field inside a grid row or a replicator item via update_item you MUST pass an array: {image:["assets::path/to/file.jpg"]}. Always call search_assets to verify a path before using it.
+GRID FIELDS (e.g. "rows" in a table group, "icons" in an icons tile) are flat arrays — each row has no _id and cannot use add_item. To populate a grid field use update_item on the parent item with the full array value. Asset fields within grid rows must be arrays: {image:["assets::path.jpg"],text:"..."}. Example icons: update_item(iconsTileId,{icons:[{image:["assets::img.jpg"],text:"Label"},...]}). Example table rows: update_item(sectionId,{rows:[{label:"Label",text:[{type:"paragraph",content:[{type:"text",text:"Value"}]}]},...]}).
+TEXTAREA FIELDS are plain strings — even when nested inside a replicator or grid. If get_blueprint shows type "textarea" or "text", always set a plain string. Never pass an array or ProseMirror object. Example steps: update_item(id,{steps:[{type:"step",title:"Title",text:"Plain text string."}]}).
 SELECT FIELDS (type: select, radio, button_group): always set to the option key as a plain string, exactly as listed under "options" in get_blueprint (e.g. badges_group: "certificates_shortest"). Never pass an object or array — that crashes the editor.
 BUTTONS in call_to_action sections: the "text" field is a plain textarea string. The "buttons" field is a replicator — add each button using add_item(parent=sectionId, field="buttons", type="button_book_page") etc., one call per button.
 BUTTONS BARD SET inside text fields (e.g. header text): button items live inside a bard set node of type "buttons". Include them inline in the values.buttons array when setting the bard field — do NOT use add_item for these. Call get_blueprint to find available button types (look for sets with names like "button_book_page" inside the "buttons" bard set). Example full bard array with a buttons set at the end: [{type:"heading",attrs:{level:1,textAlign:"left"},content:[{type:"text",text:"Title"}]},{type:"paragraph",content:[{type:"text",text:"Body."}]},{type:"set",attrs:{id:"UUID",values:{type:"buttons",enabled:true,align:"center",buttons:[{_id:"UUID",type:"button_book_page",enabled:true}]}}}]. Generate fresh UUIDs for all id/\_id fields.
