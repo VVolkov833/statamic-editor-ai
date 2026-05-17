@@ -748,6 +748,7 @@ function buildItemDefaults(blueprint, type, parentType) {
 let messages = [];
 let totalInputTokens = 0;
 let totalOutputTokens = 0;
+let totalCacheReadTokens = 0;
 let blueprintDataProvider = null;
 
 const MAX_ROUNDS = 8;
@@ -778,11 +779,6 @@ const AI_TOOLS = [
     },
   },
   {
-    name: 'get_blueprint',
-    description: 'Get the page blueprint — all available item types and their fields. Each entry includes _root_field (the top-level field handle to use as parent in add_item, e.g. "sections" or "schema") and may include _parent_set (for nested types that are only valid inside a specific parent section type). Always use _root_field as parent for top-level add_item calls.',
-    input_schema: { type: 'object', properties: {} },
-  },
-  {
     name: 'search_assets',
     description: 'Search for media assets. Always call this to verify an asset exists before using it — even when the document provides a full path. Query matching: if query contains "/" it matches against the full path (folder+filename+extension) → matched_by="path"; otherwise matches filename → matched_by="filename", folder name → matched_by="folder", or alt text → matched_by="alt". When a full path is provided (e.g. "7_botox/istock_2157073168_prostock_studio_geandert.jpg"), use it as the query exactly. Only set an asset field once search confirms the asset exists.',
     input_schema: {
@@ -807,7 +803,7 @@ const AI_TOOLS = [
   },
   {
     name: 'add_item',
-    description: 'Add a new item to any replicator. "parent" is either a root field handle (e.g. "sections", "schema") for top-level items, or the _id of a parent item for nested items. Use get_blueprint to find the correct root field handle for a type (_root_field key). When parent is an _id, "field" is required — the replicator field name within that parent (e.g. "tiles"). Adding an invalid type to a field returns an error with the correct parent suggestion.',
+    description: 'Add a new item to any replicator. "parent" is either a root field handle (e.g. "sections", "schema") for top-level items, or the _id of a parent item for nested items. Read _root_field from the blueprint in your context to find the correct root field handle for a type. When parent is an _id, "field" is required — the replicator field name within that parent (e.g. "tiles"). Adding an invalid type to a field returns an error with the correct parent suggestion.',
     input_schema: {
       type: 'object',
       properties: {
@@ -1304,7 +1300,7 @@ async function executeTool(name, input) {
               .map((s) => s.handle)
               .join(', ');
             return {
-              error: `Type "${type}" is only valid inside "${requestedSet._parent_set}" sections. Parent "${parent}" is type "${parentType}". Valid types for "${parentType}": [${validTypes || 'see get_blueprint'}]`,
+              error: `Type "${type}" is only valid inside "${requestedSet._parent_set}" sections. Parent "${parent}" is type "${parentType}". Valid types for "${parentType}": [${validTypes || 'see blueprint in context'}]`,
             };
           }
         }
@@ -1579,7 +1575,9 @@ function setTechnicalVisibility(historyEl, visible) {
 }
 
 function updateTokenDisplay(tokenEl) {
-  tokenEl.textContent = `↑${totalInputTokens} ↓${totalOutputTokens} tokens`;
+  const parts = [`↑${totalInputTokens} ↓${totalOutputTokens}`];
+  if (totalCacheReadTokens) parts.push(`+${totalCacheReadTokens} cached`);
+  tokenEl.textContent = parts.join('  ') + ' tokens';
 }
 
 function buildSystemPrompt(getBrief) {
@@ -1590,26 +1588,48 @@ function buildSystemPrompt(getBrief) {
 The site is for a plastic surgery clinic in Frankfurt, Germany.
 You help with content suggestions, copywriting, and structure advice for any entry type — pages, blog posts, testimonials, or others.
 Respond concisely.
+Do not narrate your intentions or reasoning alongside tool calls — execute tools silently. Only produce a text response when all tool calls are complete, to report what was done, ask a clarifying question, or describe a problem. Never say "I'll now…", "Let me check…", or similar planning phrases before tool calls.
 When referring to sections to the user, use 1-based numbering (e.g. "section 1", "section 2"). Tool calls always use _id values — never positional indexes.
 ITEM IDs: Every item in the brief (sections, tiles, accordion items, etc.) has a unique _id. Always use these in tool calls. Never guess or construct an _id — if you cannot find the exact _id in the brief, stop and ask the user to clarify instead of proceeding. Write tool responses include a "type" field confirming what was affected — verify it matches your intention before continuing.
 BRIEF: The brief is rebuilt after every write operation and always reflects current entry state. The current brief is the complete structure — any item not listed in it does not exist.
 HIERARCHY: The word "section" always means a top-level entry in the sections (or equivalent) array. Items nested inside a section (tiles, accordion items, etc.) are sub-items — not sections themselves. When looking for a section by type, only consider top-level entries.
 READING: The brief contains every item's _id, type, and key content. Do NOT call get_item before delete, move, or update_item — derive the _id from the brief. Only call get_item when you need full raw data not in the brief (e.g. complete ProseMirror nodes of a bard field you intend to edit).
 UPDATING: update_item patches any item at any depth by _id. To update a tile, accordion item, or any nested item, use its own _id directly — no need to reconstruct the parent array. For top-level scalar fields (title, date, slug, etc.) use update_field.
-ADDING: add_item takes parent + type. For top-level items use the root field handle as parent — call get_blueprint first and read the _root_field value on the set type you want (e.g. schema_set has _root_field:"schema", not "sections"). For nested items (e.g. a tile inside a section) use the parent item's _id as parent and set field to the replicator field name (e.g. "tiles"). The optional fields parameter is for scalar values (text, numbers, asset strings). If you pre-populate a nested replicator array via fields (e.g. fields.steps), every sub-item in that array MUST include "type" (the set handle from the blueprint) — _id and enabled are injected automatically. The same rule applies when using update_item to set a replicator field: every item in the array must include "type". Example: update_item(id, {steps:[{type:"step",title:"...",text:"..."},...]}). Omitting "type" causes silent render errors in the editor.
+ADDING: add_item takes parent + type. For top-level items use the root field handle as parent — read the _root_field value on the set type you want from the blueprint provided in your context (e.g. schema_set has _root_field:"schema", not "sections"). For nested items (e.g. a tile inside a section) use the parent item's _id as parent and set field to the replicator field name (e.g. "tiles"). The optional fields parameter is for scalar values (text, numbers, asset strings). If you pre-populate a nested replicator array via fields (e.g. fields.steps), every sub-item in that array MUST include "type" (the set handle from the blueprint) — _id and enabled are injected automatically. The same rule applies when using update_item to set a replicator field: every item in the array must include "type". Example: update_item(id, {steps:[{type:"step",title:"...",text:"..."},...]}). Omitting "type" causes silent render errors in the editor.
 BARD FIELDS use ProseMirror JSON. Bard fields cannot be set during add_item — they are always initialized empty. If you pass bard content in add_item fields, the response will include "set_bard_fields" listing the skipped fields; immediately follow up with update_item calls (in parallel) to set those fields. For existing items, always call get_item first to read the current structure before editing. ProseMirror rules: text leaf nodes are {"type":"text","text":"..."} (never "value"); paragraphs are {"type":"paragraph","content":[{"type":"text","text":"..."}]}; headings are {"type":"heading","attrs":{"level":2,"textAlign":"left"},"content":[...]}; bard set nodes use {"type":"set","attrs":{"id":"...","values":{...}}} where values holds the set fields. IMAGES in bard: never use {"type":"image",...} inline nodes — that TipTap extension is not active. Embed images as bard sets: {"type":"set","attrs":{"id":"...","values":{"type":"image","enabled":true,"image":["assets::path/to/file.jpg"]}}}.
 ASSET FIELDS always store values as arrays of "assets::..." strings — even when max_files is 1. Example: ["assets::praxis/image.jpg"]. Always include the assets:: prefix on each string. When using add_item fields for a top-level asset field you may pass a bare string and it will be auto-wrapped; but when setting an asset field inside a grid row or a replicator item via update_item you MUST pass an array: {image:["assets::path/to/file.jpg"]}. Always call search_assets to verify a path before using it.
 GRID FIELDS (e.g. "rows" in a table group, "icons" in an icons tile) are flat arrays — each row has no _id and cannot use add_item. To populate a grid field use update_item on the parent item with the full array value. Asset fields within grid rows must be arrays: {image:["assets::path.jpg"],text:"..."}. Example icons: update_item(iconsTileId,{icons:[{image:["assets::img.jpg"],text:"Label"},...]}). Example table rows: update_item(sectionId,{rows:[{label:"Label",text:[{type:"paragraph",content:[{type:"text",text:"Value"}]}]},...]}).
-TEXTAREA FIELDS are plain strings — even when nested inside a replicator or grid. If get_blueprint shows type "textarea" or "text", always set a plain string. Never pass an array or ProseMirror object. Example steps: update_item(id,{steps:[{type:"step",title:"Title",text:"Plain text string."}]}).
-SELECT FIELDS (type: select, radio, button_group): always set to the option key as a plain string, exactly as listed under "options" in get_blueprint (e.g. badges_group: "certificates_shortest"). Never pass an object or array — that crashes the editor.
+TEXTAREA FIELDS are plain strings — even when nested inside a replicator or grid. If the blueprint shows type "textarea" or "text", always set a plain string. Never pass an array or ProseMirror object. Example steps: update_item(id,{steps:[{type:"step",title:"Title",text:"Plain text string."}]}).
+SELECT FIELDS (type: select, radio, button_group): always set to the option key as a plain string, exactly as listed under "options" in the blueprint (e.g. badges_group: "certificates_shortest"). Never pass an object or array — that crashes the editor.
 BUTTONS in call_to_action sections: the "text" field is a plain textarea string. The "buttons" field is a replicator — add each button using add_item(parent=sectionId, field="buttons", type="button_book_page") etc., one call per button.
-BUTTONS BARD SET inside text fields (e.g. header text): button items live inside a bard set node of type "buttons". Include them inline in the values.buttons array when setting the bard field — do NOT use add_item for these. Call get_blueprint to find available button types (look for sets with names like "button_book_page" inside the "buttons" bard set). Example full bard array with a buttons set at the end: [{type:"heading",attrs:{level:1,textAlign:"left"},content:[{type:"text",text:"Title"}]},{type:"paragraph",content:[{type:"text",text:"Body."}]},{type:"set",attrs:{id:"UUID",values:{type:"buttons",enabled:true,align:"center",buttons:[{_id:"UUID",type:"button_book_page",enabled:true}]}}}]. Generate fresh UUIDs for all id/\_id fields.
+BUTTONS BARD SET inside text fields (e.g. header text): button items live inside a bard set node of type "buttons". Include them inline in the values.buttons array when setting the bard field — do NOT use add_item for these. Find available button types in the blueprint provided in your context (look for sets with names like "button_book_page" inside the "buttons" bard set). Example full bard array with a buttons set at the end: [{type:"heading",attrs:{level:1,textAlign:"left"},content:[{type:"text",text:"Title"}]},{type:"paragraph",content:[{type:"text",text:"Body."}]},{type:"set",attrs:{id:"UUID",values:{type:"buttons",enabled:true,align:"center",buttons:[{_id:"UUID",type:"button_book_page",enabled:true}]}}}]. Generate fresh UUIDs for all id/\_id fields.
 EMPTY FIELDS: The brief omits fields that have no value. The "_fields" key lists all known field handles for this entry type, including empty ones. If a user refers to a field not shown in the brief but listed in "_fields", use update_field or get_field directly — do not say the field doesn't exist.
 When passing a complex object or array as a tool argument value, pass it as a native JSON value — never as a JSON string.`;
+
+  // Get blueprint — prefer the endpoint-fetched cache (fully resolves imported fieldsets),
+  // fall back to Vuex-derived extraction.
+  const bpCached = blueprintDataProvider?.()?.sets;
+  const blueprintSets = (bpCached && Object.keys(bpCached).length > 0)
+    ? bpCached
+    : (() => {
+        const bp = getPublishStore(window.Statamic)?.blueprint;
+        return bp ? extractBlueprintSets(bp) : null;
+      })();
+  const blueprintJson = blueprintSets ? JSON.stringify(blueprintSets) : null;
 
   const blocks = [
     { type: 'text', text: staticText, cache_control: { type: 'ephemeral' } },
   ];
+
+  if (blueprintJson) {
+    // Blueprint as a second cached block — avoids a get_blueprint tool call and keeps the
+    // blueprint tokens cached (0.1× cost) across all rounds in the same build session.
+    blocks.push({
+      type: 'text',
+      text: `Blueprint (all available item types with _root_field, _parent_set, field handles and types):\n\`\`\`json\n${blueprintJson}\n\`\`\``,
+      cache_control: { type: 'ephemeral' },
+    });
+  }
 
   if (briefJson) {
     blocks.push({ type: 'text', text: `Current page brief:\n\`\`\`json\n${briefJson}\n\`\`\`` });
@@ -1819,6 +1839,7 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
     messages = [];
     totalInputTokens = 0;
     totalOutputTokens = 0;
+    totalCacheReadTokens = 0;
     history.innerHTML = '';
     updateTokenDisplay(tokenInfo);
   });
@@ -1952,7 +1973,6 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
 
   const BUILD_PROMPT_RULES =
     'Blockquotes are editor instructions — they describe what to create and how. The content directly below a blockquote is the actual content for that section. Blockquotes may use formal directives ("> [[ SECTION: type ]]") or plain natural language ("Quote section, text below") — treat both as instructions.\n' +
-    'Use get_blueprint to learn available set types and field names before adding sections.\n' +
     'GRID FIELDS: some fields (e.g. "rows" in table sections) are grid fields, NOT replicators. ' +
     'Grid fields have no _id per row and cannot use add_item. ' +
     'Populate a grid field by calling update_item on the parent with the full array value.\n' +
@@ -2068,6 +2088,7 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
 
         totalInputTokens += data.usage?.input_tokens ?? 0;
         totalOutputTokens += data.usage?.output_tokens ?? 0;
+        totalCacheReadTokens += data.usage?.cache_read_input_tokens ?? 0;
         updateTokenDisplay(tokenInfo);
 
         if (data.stop_reason !== 'tool_use') {
@@ -2114,9 +2135,8 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
           lastToolSignature = null;
         }
 
-        // Show any text Claude included alongside the tool call
-        const textBlock = data.content.find((b) => b.type === 'text' && b.text?.trim());
-        if (textBlock) appendMessage(history, 'assistant', textBlock.text);
+        // Intermediate text alongside tool calls is suppressed — it is always narration
+        // ("I'll now…", "Let me verify…"). Questions and error reports are shown as end_turn.
 
         // Execute tools
         const toolResults = [];
