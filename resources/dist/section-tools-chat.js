@@ -336,7 +336,13 @@ function injectNestedReplicatorItemsMeta(statamic, rootHandle, itemId, replicato
 // renderer crashes with "Cannot read properties of undefined (reading '<fieldHandle>')".
 // This function recursively searches the nested meta hierarchy for the parent item and
 // injects existing entries for each new grid row.
-function injectNestedGridRowsMeta(statamic, rootHandle, itemId, gridUpdates) {
+//
+// gridRowAssetData: pre-fetched asset objects keyed as
+//   { gridFieldHandle: { rowId: { assetFieldHandle: [assetObjects] } } }
+// Setting meta.data on each assets sub-field prevents Statamic's initializeAssets from
+// calling loadAssets (async), which would overwrite meta with a stale snapshot and crash
+// the renderer for subsequently-added items.
+function injectNestedGridRowsMeta(statamic, rootHandle, itemId, gridUpdates, gridRowAssetData = {}) {
   const publishStore = getPublishStore(statamic);
   const meta = publishStore?.meta;
   if (!meta) return;
@@ -361,10 +367,17 @@ function injectNestedGridRowsMeta(statamic, rootHandle, itemId, gridUpdates) {
         }
         const fieldMeta = itemMeta[fieldHandle];
         if (!fieldMeta.existing) fieldMeta.existing = {};
+        const rowAssetMap = gridRowAssetData[fieldHandle] ?? {};
         for (const row of newRows) {
           const rowId = row._id;
           if (!rowId || fieldMeta.existing[rowId]) continue;
-          fieldMeta.existing[rowId] = {};
+          // Build initial row meta: for each assets sub-field, set data to the pre-fetched
+          // asset objects so initializeAssets skips its async loadAssets call entirely.
+          const rowAssetFields = rowAssetMap[rowId] ?? {};
+          const rowInitMeta = Object.fromEntries(
+            Object.entries(rowAssetFields).map(([fh, assetData]) => [fh, { data: assetData }])
+          );
+          fieldMeta.existing[rowId] = rowInitMeta;
           patched = true;
         }
       }
@@ -1048,6 +1061,34 @@ async function executeTool(name, input) {
       if (effectiveType === 'bard' && Array.isArray(sanitized)) bardFieldUpdates[effectiveKey] = sanitized;
       normalizedFields[effectiveKey] = sanitized;
     }
+    // Pre-fetch asset objects for all assets fields inside grid rows so that
+    // injectNestedGridRowsMeta can populate meta.data and prevent loadAssets calls.
+    // { gridHandle: { rowId: { assetFieldHandle: [assetObjects] } } }
+    const gridRowAssetData = {};
+    const gridFetchEntries = Object.entries(normalizedFields).filter(
+      ([k, v]) => itemFieldTypes[k] === 'grid' && Array.isArray(v)
+    );
+    for (const [gridHandle, rows] of gridFetchEntries) {
+      const gridFieldDef = cachedSetsSnapshot[resolvedSetType]?.fields?.find(f => f.handle === gridHandle);
+      const rowFieldTypes = gridFieldDef?.fields
+        ? Object.fromEntries(gridFieldDef.fields.filter(f => f.handle && f.type).map(f => [f.handle, f.type]))
+        : {};
+      const assetHandles = Object.entries(rowFieldTypes).filter(([, ft]) => ft === 'assets').map(([fh]) => fh);
+      if (!assetHandles.length) continue;
+      gridRowAssetData[gridHandle] = {};
+      await Promise.all(rows.map(async (row) => {
+        if (!row?._id) return;
+        const rowAssets = {};
+        await Promise.all(assetHandles.map(async (fh) => {
+          const paths = row[fh];
+          if (Array.isArray(paths) && paths.length) {
+            rowAssets[fh] = await fetchStatamicAssetData(paths);
+          }
+        }));
+        if (Object.keys(rowAssets).length) gridRowAssetData[gridHandle][row._id] = rowAssets;
+      }));
+    }
+
     for (const [rootHandle, rootValue] of Object.entries(values)) {
       if (!Array.isArray(rootValue)) continue;
       const cloned = cloneValue(rootValue);
@@ -1080,11 +1121,12 @@ async function executeTool(name, input) {
           }
         }
         // Inject meta for new grid rows on the item itself (e.g., icons grid on an icons tile).
+        // Pass pre-fetched asset data so loadAssets is never triggered for image fields in rows.
         const gridUpdates = Object.fromEntries(
           Object.entries(normalizedFields).filter(([k, v]) => itemFieldTypes[k] === 'grid' && Array.isArray(v))
         );
         if (Object.keys(gridUpdates).length) {
-          injectNestedGridRowsMeta(window.Statamic, rootHandle, input.id, gridUpdates);
+          injectNestedGridRowsMeta(window.Statamic, rootHandle, input.id, gridUpdates, gridRowAssetData);
         }
         pushUndoSnapshot();
         commitField(window.Statamic, rootHandle, cloned);
