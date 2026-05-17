@@ -1,4 +1,4 @@
-import { getPublishStore, uid, getPublishModuleNames, cloneValue, commitField } from './section-tools-lib.js';
+import { getPublishStore, uid, getPublishModuleNames, cloneValue, commitField, readPanelState, writePanelState } from './section-tools-lib.js';
 import { simplifyBlueprintNode, fetchAssetsForAI, extractBlueprintSets, validateSetTypeForField, buildRootFieldMap } from './section-tools-queries.js';
 import { pushUndoSnapshot } from './section-tools-mutations.js';
 
@@ -1142,7 +1142,7 @@ function mountBardEditor(container) {
   if (!document.getElementById('st-bard-doc-style')) {
     const s = document.createElement('style');
     s.id = 'st-bard-doc-style';
-    s.textContent = '.st-doc-bard .bard-editor .ProseMirror{min-height:80px;max-height:160px;overflow-y:auto;padding:6px 8px;outline:none}.st-doc-bard .bard-fieldtype-wrapper{border:1px solid rgba(0,0,0,0.15);border-radius:4px}.st-doc-bard .bard-content ul{list-style-type:disc;padding-left:1.5em;margin:.3em 0}.st-doc-bard .bard-content ol{list-style-type:decimal;padding-left:1.5em;margin:.3em 0}.st-doc-bard .bard-content li{margin:.1em 0}.st-doc-bard .bard-content blockquote{border-left:3px solid rgba(0,0,0,0.25);padding-left:.75em;margin:.3em 0;color:rgba(0,0,0,0.6);font-style:italic}.st-doc-bard .bard-content table{border-collapse:collapse;width:100%;margin:.5em 0}.st-doc-bard .bard-content td,.st-doc-bard .bard-content th{border:1px solid rgba(0,0,0,0.2);padding:4px 8px;min-width:2em}.st-doc-bard .bard-content th{background:rgba(0,0,0,0.04);font-weight:600}.st-doc-portals .popover{z-index:100}.st-doc-portals .stack{z-index:100}.st-doc-bard .bard-content a{color:#43a9ff;text-decoration:underline}';
+    s.textContent = '.st-doc-bard{display:flex;flex-direction:column;flex:1;min-height:0}.st-doc-bard>div,.st-doc-bard>div>div,.st-doc-bard>div>div>div{display:flex;flex-direction:column;flex:1;min-height:0}.st-doc-bard .bard-editor .ProseMirror{min-height:80px;overflow-y:auto;padding:6px 8px;outline:none}.st-doc-bard .bard-fieldtype-wrapper{border:1px solid rgba(0,0,0,0.15);border-radius:4px;display:flex;flex-direction:column;flex:1;min-height:0}.st-doc-bard .bard-editor{display:flex;flex-direction:column;flex:1;min-height:0}.st-doc-bard .bard-content{flex:1;min-height:0;overflow-y:auto}.st-doc-bard .bard-content ul{list-style-type:disc;padding-left:1.5em;margin:.3em 0}.st-doc-bard .bard-content ol{list-style-type:decimal;padding-left:1.5em;margin:.3em 0}.st-doc-bard .bard-content li{margin:.1em 0}.st-doc-bard .bard-content blockquote{border-left:3px solid rgba(0,0,0,0.25);padding-left:.75em;margin:.3em 0;color:rgba(0,0,0,0.6);font-style:italic}.st-doc-bard .bard-content table{border-collapse:collapse;width:100%;margin:.5em 0}.st-doc-bard .bard-content td,.st-doc-bard .bard-content th{border:1px solid rgba(0,0,0,0.2);padding:4px 8px;min-width:2em}.st-doc-bard .bard-content th{background:rgba(0,0,0,0.04);font-weight:600}.st-doc-portals .popover{z-index:100}.st-doc-portals .stack{z-index:100}.st-doc-bard .bard-content a{color:#43a9ff;text-decoration:underline}';
     document.head.appendChild(s);
   }
   container.classList.add('st-doc-bard');
@@ -1219,13 +1219,16 @@ function mountBardEditor(container) {
   };
 }
 
-export function createChatSection(getBrief, getBlueprintData) {
+export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
   blueprintDataProvider = getBlueprintData ?? null;
-  let showTechnical = true;
+  const _initState = panelStorageKey ? readPanelState(panelStorageKey) : {};
+  let showTechnical = _initState.showTechnical ?? false;
 
   const section = document.createElement('div');
   section.style.display = 'flex';
   section.style.flexDirection = 'column';
+  section.style.flex = '1';
+  section.style.minHeight = '0';
   section.style.gap = '5px';
   section.style.paddingBottom = '8px';
   section.style.borderBottom = '1px solid rgba(0,0,0,0.1)';
@@ -1267,6 +1270,7 @@ export function createChatSection(getBrief, getBlueprintData) {
   // Header row: tabs + action buttons
   const headerRow = document.createElement('div');
   headerRow.style.display = 'flex';
+  headerRow.style.flexShrink = '0';
   headerRow.style.justifyContent = 'space-between';
   headerRow.style.alignItems = 'center';
 
@@ -1303,7 +1307,7 @@ export function createChatSection(getBrief, getBlueprintData) {
 
   const techToggle = document.createElement('button');
   techToggle.type = 'button';
-  techToggle.textContent = 'hide technical';
+  techToggle.textContent = showTechnical ? 'hide technical' : 'show technical';
   techToggle.style.fontSize = '10px';
   techToggle.style.background = 'none';
   techToggle.style.border = 'none';
@@ -1315,11 +1319,12 @@ export function createChatSection(getBrief, getBlueprintData) {
     showTechnical = !showTechnical;
     techToggle.textContent = showTechnical ? 'hide technical' : 'show technical';
     setTechnicalVisibility(history, showTechnical);
+    if (panelStorageKey) writePanelState(panelStorageKey, { showTechnical });
   });
 
   const clearBtn = document.createElement('button');
   clearBtn.type = 'button';
-  clearBtn.textContent = 'clear chat';
+  clearBtn.textContent = 'new chat';
   clearBtn.style.fontSize = '10px';
   clearBtn.style.background = 'none';
   clearBtn.style.border = 'none';
@@ -1337,18 +1342,28 @@ export function createChatSection(getBrief, getBlueprintData) {
 
   headerButtons.appendChild(techToggle);
   headerButtons.appendChild(clearBtn);
+
+  // Mirrors headerButtons but shown in the Document tab
+  const docHeaderButtons = document.createElement('div');
+  docHeaderButtons.style.display = 'none';
+  docHeaderButtons.style.gap = '8px';
+  docHeaderButtons.style.alignItems = 'center';
+
   headerRow.appendChild(tabBar);
   headerRow.appendChild(headerButtons);
+  headerRow.appendChild(docHeaderButtons);
 
   // Chat view
   const chatView = document.createElement('div');
   chatView.style.display = 'flex';
+  chatView.style.flex = '1';
+  chatView.style.minHeight = '0';
   chatView.style.flexDirection = 'column';
   chatView.style.gap = '5px';
 
   const history = document.createElement('div');
-  history.style.maxHeight = '180px';
-  history.style.minHeight = '32px';
+  history.style.flex = '1';
+  history.style.minHeight = '40px';
   history.style.overflowY = 'auto';
   history.style.display = 'flex';
   history.style.flexDirection = 'column';
@@ -1356,10 +1371,9 @@ export function createChatSection(getBrief, getBlueprintData) {
   const inputRow = document.createElement('div');
   inputRow.style.display = 'flex';
   inputRow.style.gap = '5px';
-  inputRow.style.alignItems = 'flex-end';
 
   const textarea = document.createElement('textarea');
-  textarea.rows = 2;
+  textarea.rows = 3;
   textarea.placeholder = 'Ask Claude… (Enter to send, Shift+Enter for new line)';
   textarea.style.flex = '1';
   textarea.style.resize = 'vertical';
@@ -1374,8 +1388,7 @@ export function createChatSection(getBrief, getBlueprintData) {
   sendBtn.type = 'button';
   sendBtn.className = 'btn btn-primary';
   sendBtn.textContent = 'Send';
-  sendBtn.style.fontSize = '12px';
-  sendBtn.style.padding = '4px 10px';
+  sendBtn.style.alignSelf = 'stretch';
 
   const tokenInfo = document.createElement('div');
   tokenInfo.style.fontSize = '10px';
@@ -1392,16 +1405,16 @@ export function createChatSection(getBrief, getBlueprintData) {
   // Document view
   const documentView = document.createElement('div');
   documentView.style.display = 'none';
+  documentView.style.flex = '1';
+  documentView.style.minHeight = '0';
   documentView.style.flexDirection = 'column';
   documentView.style.gap = '5px';
 
-  const docDesc = document.createElement('div');
-  docDesc.textContent = 'Paste your document here, or upload a .docx file. Click "Build" to let the AI restructure the page.';
-  docDesc.style.fontSize = '11px';
-  docDesc.style.color = 'rgba(0,0,0,0.45)';
-  docDesc.style.lineHeight = '1.4';
-
   const docEditorContainer = document.createElement('div');
+  docEditorContainer.style.flex = '1';
+  docEditorContainer.style.minHeight = '0';
+  docEditorContainer.style.display = 'flex';
+  docEditorContainer.style.flexDirection = 'column';
 
   function ensureBardEditor() {
     if (bardEditor) return;
@@ -1410,20 +1423,15 @@ export function createChatSection(getBrief, getBlueprintData) {
 
   const docBtnRow = document.createElement('div');
   docBtnRow.style.display = 'flex';
-  docBtnRow.style.gap = '6px';
+  docBtnRow.style.flexShrink = '0';
   docBtnRow.style.justifyContent = 'flex-end';
   docBtnRow.style.alignItems = 'center';
+  docBtnRow.style.gap = '6px';
 
   const clearDocBtn = document.createElement('button');
   clearDocBtn.type = 'button';
-  clearDocBtn.textContent = 'Clear';
-  clearDocBtn.style.fontSize = '11px';
-  clearDocBtn.style.background = 'none';
-  clearDocBtn.style.border = '1px solid rgba(0,0,0,0.2)';
-  clearDocBtn.style.borderRadius = '4px';
-  clearDocBtn.style.cursor = 'pointer';
-  clearDocBtn.style.padding = '3px 10px';
-  clearDocBtn.style.color = 'rgba(0,0,0,0.5)';
+  clearDocBtn.textContent = 'clear';
+  clearDocBtn.style.cssText = 'font-size:10px;background:none;border:none;cursor:pointer;color:rgba(0,0,0,0.35);padding:0;font-family:inherit';
   clearDocBtn.addEventListener('click', () => { bardEditor?.clear(); });
 
   // .docx upload — hidden file input + visible label button, revealed after mammoth loads
@@ -1436,13 +1444,7 @@ export function createChatSection(getBrief, getBlueprintData) {
   uploadBtn.type = 'button';
   uploadBtn.textContent = 'loading…';
   uploadBtn.disabled = true;
-  uploadBtn.style.fontSize = '11px';
-  uploadBtn.style.background = 'none';
-  uploadBtn.style.border = '1px solid rgba(0,0,0,0.2)';
-  uploadBtn.style.borderRadius = '4px';
-  uploadBtn.style.cursor = 'default';
-  uploadBtn.style.padding = '3px 10px';
-  uploadBtn.style.color = 'rgba(0,0,0,0.35)';
+  uploadBtn.style.cssText = 'font-size:10px;background:none;border:none;cursor:pointer;color:rgba(0,0,0,0.35);padding:0;font-family:inherit';
 
   docxInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
@@ -1455,9 +1457,9 @@ export function createChatSection(getBrief, getBlueprintData) {
       bardEditor?.setContent(html);
     } catch (err) {
       uploadBtn.textContent = 'read error';
-      setTimeout(() => { uploadBtn.textContent = 'Upload .docx'; }, 2000);
+      setTimeout(() => { uploadBtn.textContent = 'upload .docx'; }, 2000);
     } finally {
-      uploadBtn.textContent = 'Upload .docx';
+      uploadBtn.textContent = 'upload .docx';
       uploadBtn.disabled = false;
       docxInput.value = '';
     }
@@ -1465,43 +1467,53 @@ export function createChatSection(getBrief, getBlueprintData) {
 
   uploadBtn.addEventListener('click', () => { if (!uploadBtn.disabled) docxInput.click(); });
 
-  const buildBtn = document.createElement('button');
-  buildBtn.type = 'button';
-  buildBtn.className = 'btn btn-primary';
-  buildBtn.textContent = 'Build page';
-  buildBtn.style.fontSize = '11px';
-  buildBtn.style.padding = '3px 12px';
+  const BUILD_PROMPT_RULES =
+    'Blockquotes are editor instructions — they describe what to create and how. The content directly below a blockquote is the actual content for that section. Blockquotes may use formal directives ("> [[ SECTION: type ]]") or plain natural language ("Quote section, text below") — treat both as instructions.\n' +
+    'Use get_blueprint to learn available set types and field names before adding sections.\n' +
+    'GRID FIELDS: some fields (e.g. "rows" in table sections) are grid fields, NOT replicators. ' +
+    'Grid fields have no _id per row and cannot use add_item. ' +
+    'Populate a grid field by calling update_item on the parent with the full array value.\n' +
+    'TABLE SECTIONS — exact sequence (no deviation):\n' +
+    '  1. add_item(parent="sections", type="table") → note the returned id as TABLE_ID\n' +
+    '  2. add_item(parent=TABLE_ID, field="table", type="section") → note returned id as GROUP_ID\n' +
+    '  3. update_item(GROUP_ID, {rows:[{label:"Label",text:[{type:"paragraph",content:[{type:"text",text:"Value"}]}]}, ...]}) — do this immediately in the same tool batch as step 2 if possible, or in the very next tool call. Do NOT skip this step or say you will do it later.\n\n' +
+    '---\n\n';
 
-  buildBtn.addEventListener('click', () => {
+  function doBuild(mode) {
     const html = bardEditor?.getHTML() ?? '';
     const md = htmlToMarkdown(html);
     if (!md.trim()) return;
 
-    // Clear existing sections client-side so the AI only adds — never deletes.
-    commitField(window.Statamic, 'sections', []);
+    if (mode === 'replace') {
+      commitField(window.Statamic, 'sections', []);
+    }
 
-    const prompt =
-      'The page sections have been cleared. Build new sections from the document content below.\n' +
-      'Blockquotes are editor instructions — they describe what to create and how. The content directly below a blockquote is the actual content for that section. Blockquotes may use formal directives ("> [[ SECTION: type ]]") or plain natural language ("Quote section, text below") — treat both as instructions.\n' +
-      'Use get_blueprint to learn available set types and field names before adding sections.\n' +
-      'GRID FIELDS: some fields (e.g. "rows" in table sections) are grid fields, NOT replicators. ' +
-      'Grid fields have no _id per row and cannot use add_item. ' +
-      'Populate a grid field by calling update_item on the parent with the full array value.\n' +
-      'TABLE SECTIONS — exact sequence (no deviation):\n' +
-      '  1. add_item(parent="sections", type="table") → note the returned id as TABLE_ID\n' +
-      '  2. add_item(parent=TABLE_ID, field="table", type="section") → note returned id as GROUP_ID\n' +
-      '  3. update_item(GROUP_ID, {rows:[{label:"Label",text:[{type:"paragraph",content:[{type:"text",text:"Value"}]}]}, ...]}) — do this immediately in the same tool batch as step 2 if possible, or in the very next tool call. Do NOT skip this step or say you will do it later.\n\n' +
-      '---\n\n' + md;
+    const preamble = mode === 'replace'
+      ? 'The page sections have been cleared. Build new sections from the document content below.\n'
+      : 'Add new sections from the document content below, appending after all existing sections. Do not modify or remove existing sections.\n';
 
     switchTab('chat');
-    handleSend(prompt, { maxRounds: MAX_ROUNDS_BUILD, maxTokens: 8192, isBuild: true });
-  });
+    handleSend(preamble + BUILD_PROMPT_RULES + md, { maxRounds: MAX_ROUNDS_BUILD, maxTokens: 8192, isBuild: true });
+  }
+
+  const replaceBtn = document.createElement('button');
+  replaceBtn.type = 'button';
+  replaceBtn.className = 'btn btn-primary';
+  replaceBtn.textContent = 'clear and build';
+  replaceBtn.addEventListener('click', () => doBuild('replace'));
+
+  const appendBtn = document.createElement('button');
+  appendBtn.type = 'button';
+  appendBtn.className = 'btn btn-primary';
+  appendBtn.textContent = 'add to page';
+  appendBtn.addEventListener('click', () => doBuild('append'));
+
+  docHeaderButtons.appendChild(clearDocBtn);
+  docHeaderButtons.appendChild(uploadBtn);
 
   docBtnRow.appendChild(docxInput);
-  docBtnRow.appendChild(clearDocBtn);
-  docBtnRow.appendChild(uploadBtn);
-  docBtnRow.appendChild(buildBtn);
-  documentView.appendChild(docDesc);
+  docBtnRow.appendChild(appendBtn);
+  docBtnRow.appendChild(replaceBtn);
   documentView.appendChild(docEditorContainer);
   documentView.appendChild(docBtnRow);
 
@@ -1513,10 +1525,8 @@ export function createChatSection(getBrief, getBlueprintData) {
     const s = document.createElement('script');
     s.src = `${cpRoot}/section-tools/mammoth.js`;
     s.onload = () => {
-      uploadBtn.textContent = 'Upload .docx';
+      uploadBtn.textContent = 'upload .docx';
       uploadBtn.disabled = false;
-      uploadBtn.style.cursor = 'pointer';
-      uploadBtn.style.color = 'rgba(0,0,0,0.6)';
     };
     s.onerror = () => { uploadBtn.textContent = 'docx N/A'; };
     document.head.appendChild(s);
@@ -1530,7 +1540,8 @@ export function createChatSection(getBrief, getBlueprintData) {
     docTabBtn.style.color = tab === 'document' ? 'rgba(0,0,0,0.7)' : 'rgba(0,0,0,0.35)';
     chatView.style.display = tab === 'chat' ? 'flex' : 'none';
     documentView.style.display = tab === 'document' ? 'flex' : 'none';
-    headerButtons.style.visibility = tab === 'chat' ? 'visible' : 'hidden';
+    headerButtons.style.display = tab === 'chat' ? 'flex' : 'none';
+    docHeaderButtons.style.display = tab === 'document' ? 'flex' : 'none';
     if (tab === 'document') { ensureBardEditor(); loadMammoth(); }
   }
 
@@ -1548,7 +1559,8 @@ export function createChatSection(getBrief, getBlueprintData) {
     if (!customText) textarea.value = '';
     textarea.disabled = true;
     sendBtn.disabled = true;
-    buildBtn.disabled = true;
+    replaceBtn.disabled = true;
+    appendBtn.disabled = true;
     sendBtn.textContent = '…';
 
     const displayText = customText && customText.length > 120
@@ -1670,7 +1682,8 @@ export function createChatSection(getBrief, getBlueprintData) {
     } finally {
       textarea.disabled = false;
       sendBtn.disabled = false;
-      buildBtn.disabled = false;
+      replaceBtn.disabled = false;
+      appendBtn.disabled = false;
       sendBtn.textContent = 'Send';
       textarea.focus();
     }

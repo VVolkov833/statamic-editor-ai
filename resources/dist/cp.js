@@ -13,7 +13,7 @@ import {
   searchAssets,
   logAssetSearch,
 } from './section-tools-queries';
-import { syncSectionToolsUi, persistPanelPositionOnResize } from './section-tools-panel';
+import { syncSectionToolsUi, persistPanelPositionOnResize, togglePanelVisibility } from './section-tools-panel';
 import { getPublishStore as libGetPublishStore, buildPageBrief as libBuildPageBrief } from './section-tools-lib';
 
 (() => {
@@ -131,6 +131,69 @@ import { getPublishStore as libGetPublishStore, buildPageBrief as libBuildPageBr
   window.SectionTools.logBlueprintById = logSectionBlueprintById;
   window.SectionTools.logPageBrief = logPageBrief;
   window.SectionTools.searchAssets = searchAssets;
+  window.SectionTools.togglePanel = () => togglePanelVisibility(panelStorageKey);
+
+  const TOPBAR_BTN_ID = 'section-tools-topbar-btn';
+  const LP_BTN_ID = 'section-tools-lp-btn';
+
+  // Inject toggle button into the Statamic global header (only on entry edit screens).
+  function injectTopBarButton() {
+    const existing = document.getElementById(TOPBAR_BTN_ID);
+    if (!isEntryEditScreen()) {
+      if (existing) existing.remove();
+      return;
+    }
+    if (existing) return;
+
+    const headLink = document.querySelector('.global-header .head-link');
+    if (!headLink) return;
+
+    const btn = document.createElement('button');
+    btn.id = TOPBAR_BTN_ID;
+    btn.type = 'button';
+    btn.className = 'global-header-icon-button hidden md:block';
+    btn.setAttribute('aria-label', 'AI Assistant');
+    btn.title = 'AI Assistant';
+    // Chat bubble icon
+    btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
+    btn.addEventListener('click', () => togglePanelVisibility(panelStorageKey));
+
+    // Insert before the dark-mode-toggle (first utility button)
+    const darkModeEl = headLink.querySelector('dark-mode-toggle');
+    if (darkModeEl) {
+      headLink.insertBefore(btn, darkModeEl);
+    } else {
+      headLink.prepend(btn);
+    }
+  }
+
+  // Inject toggle button into the live-preview header bar (covers the global top bar in LP mode).
+  function injectLivePreviewButton() {
+    if (document.getElementById(LP_BTN_ID)) return;
+
+    const lpHeader = document.querySelector('.live-preview-header');
+    if (!lpHeader) return;
+
+    const flexRow = lpHeader.querySelector('.flex.items-center');
+    if (!flexRow) return;
+
+    const btn = document.createElement('button');
+    btn.id = LP_BTN_ID;
+    btn.type = 'button';
+    btn.className = 'btn';
+    btn.style.cssText = 'margin-left:8px;display:inline-flex;align-items:center;gap:4px';
+    btn.setAttribute('aria-label', 'Toggle AI Assistant');
+    btn.title = 'Toggle AI Assistant';
+    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> AI`;
+    btn.addEventListener('click', () => togglePanelVisibility(panelStorageKey));
+
+    const closeBtn = flexRow.querySelector('.btn-close');
+    if (closeBtn) {
+      flexRow.insertBefore(btn, closeBtn);
+    } else {
+      flexRow.appendChild(btn);
+    }
+  }
 
   function syncButtons() {
     syncSectionToolsUi({
@@ -149,6 +212,8 @@ import { getPublishStore as libGetPublishStore, buildPageBrief as libBuildPageBr
         onSearchAssets: logAssetSearch,
       },
     });
+    injectTopBarButton();
+    injectLivePreviewButton();
   }
 
   function scheduleUiSync() {

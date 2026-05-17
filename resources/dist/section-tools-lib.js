@@ -815,3 +815,24 @@ export function cloneThirdSectionAfterwards(statamic) {
 
   return cloneSection(statamic, targetId, true);
 }
+
+// Unified panel state: position, size, hidden, showTechnical — all in one key.
+// The storage key is derived from the panel's per-user key by replacing "position" → "state".
+export function readPanelState(storageKey) {
+  try {
+    const stateKey = storageKey.replace('-position:', '-state:');
+    const raw = window.localStorage.getItem(stateKey);
+    return raw ? (JSON.parse(raw) ?? {}) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function writePanelState(storageKey, updates) {
+  const stateKey = storageKey.replace('-position:', '-state:');
+  try {
+    const raw = window.localStorage.getItem(stateKey);
+    const current = raw ? (JSON.parse(raw) ?? {}) : {};
+    window.localStorage.setItem(stateKey, JSON.stringify({ ...current, ...updates }));
+  } catch {}
+}
