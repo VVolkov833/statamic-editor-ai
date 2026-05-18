@@ -115,8 +115,8 @@ function injectTopLevelItemMeta(statamic, rootHandle, newItemId, type,
   if (!typeTemplate) {
     // Build stub from cached blueprint: each field handle → {} so field components
     // receive a defined (if empty) meta object rather than undefined.
-    const cachedSets = blueprintDataProvider?.()?.sets ?? {};
-    const setDef = cachedSets[type];
+    const bpTree = blueprintDataProvider?.()?.sets ?? {};
+    const setDef = findSetDefInTree(bpTree, type);
     typeTemplate = setDef?.fields?.length
       ? Object.fromEntries(setDef.fields.map((f) => [f.handle, {}]))
       : {};
@@ -517,16 +517,17 @@ function removeItemFromArray(arr, targetId) {
   return false;
 }
 
-function findItemWithParent(arr, targetId) {
+function findItemWithParent(arr, targetId, _parentType = null, _parentField = null) {
   for (let i = 0; i < arr.length; i++) {
     const item = arr[i];
     if (!item || typeof item !== 'object') continue;
     if (getItemId(item) === targetId) {
-      return { item, parentArray: arr, index: i };
+      return { item, parentArray: arr, index: i, parentType: _parentType, parentField: _parentField };
     }
-    for (const fieldValue of Object.values(item)) {
-      if (Array.isArray(fieldValue)) {
-        const found = findItemWithParent(fieldValue, targetId);
+    const currentType = item.type ?? null;
+    for (const [fk, fv] of Object.entries(item)) {
+      if (Array.isArray(fv)) {
+        const found = findItemWithParent(fv, targetId, currentType, fk);
         if (found) return found;
       }
     }
@@ -745,6 +746,63 @@ function buildItemDefaults(blueprint, type, parentType) {
   return defaults;
 }
 
+// --- Blueprint tree helpers ---
+// The blueprint is a nested tree: { rootField: { setHandle: { display, fields, sets? } } }
+// where sets?: { replicatorFieldHandle: { nestedSetHandle: {...} } }
+
+function searchSetInLevel(setsLevel, type) {
+  if (!setsLevel || typeof setsLevel !== 'object') return null;
+  if (setsLevel[type]) return setsLevel[type];
+  for (const setDef of Object.values(setsLevel)) {
+    if (!setDef?.sets) continue;
+    for (const nestedLevel of Object.values(setDef.sets)) {
+      const found = searchSetInLevel(nestedLevel, type);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+// Find a set definition in the tree. Context-aware: exact (parentType+field) > top-level > anywhere.
+function findSetDefInTree(tree, type, parentType = null, parentField = null) {
+  if (!tree || !type) return null;
+  if (parentType && parentField) {
+    for (const rootSets of Object.values(tree)) {
+      const parentDef = searchSetInLevel(rootSets, parentType);
+      const nested = parentDef?.sets?.[parentField]?.[type];
+      if (nested) return nested;
+    }
+  }
+  for (const rootSets of Object.values(tree)) {
+    if (rootSets[type]) return rootSets[type];
+  }
+  for (const rootSets of Object.values(tree)) {
+    const found = searchSetInLevel(rootSets, type);
+    if (found) return found;
+  }
+  return null;
+}
+
+function getRootFieldForType(tree, type) {
+  for (const [rootField, rootSets] of Object.entries(tree)) {
+    if (rootSets[type]) return rootField;
+  }
+  return null;
+}
+
+function getTreeRootFields(tree) { return Object.keys(tree ?? {}); }
+
+function getTopLevelTypesForField(tree, rootField) { return Object.keys(tree?.[rootField] ?? {}); }
+
+function getChildTypes(tree, parentType, field) {
+  for (const rootSets of Object.values(tree ?? {})) {
+    const parentDef = searchSetInLevel(rootSets, parentType);
+    const nestedLevel = parentDef?.sets?.[field];
+    if (nestedLevel) return Object.keys(nestedLevel);
+  }
+  return [];
+}
+
 let messages = [];
 let totalInputTokens = 0;
 let totalOutputTokens = 0;
@@ -803,7 +861,7 @@ const AI_TOOLS = [
   },
   {
     name: 'add_item',
-    description: 'Add a new item to any replicator. "parent" is either a root field handle (e.g. "sections", "schema") for top-level items, or the _id of a parent item for nested items. Read _root_field from the blueprint in your context to find the correct root field handle for a type. When parent is an _id, "field" is required — the replicator field name within that parent (e.g. "tiles"). Adding an invalid type to a field returns an error with the correct parent suggestion.',
+    description: 'Add a new item to any replicator. "parent" is either a root field handle (e.g. "sections", "schema") for top-level items, or the _id of a parent item for nested items. To find the correct root field handle for a type, look it up in the blueprint tree provided in your context (the top-level keys of the "sets" object are the root field handles). When parent is an _id, "field" is required — the replicator field name within that parent (e.g. "tiles"). Adding an invalid type to a field returns an error with the valid types.',
     input_schema: {
       type: 'object',
       properties: {
@@ -927,7 +985,9 @@ async function executeTool(name, input) {
     // Prefer the endpoint blueprint (fully resolves imported fieldsets) over Vuex-derived.
     let itemFieldTypes = {};
     let resolvedSetType = null;
-    // Use the endpoint blueprint (fully resolves imported fieldsets); fall back to Vuex-derived.
+    let resolvedParentType = null;
+    let resolvedParentField = null;
+    // cachedSetsSnapshot is now a nested tree: { rootField: { setHandle: {...} } }
     const cachedSetsSnapshot = (() => {
       const ep = blueprintDataProvider?.()?.sets ?? {};
       return Object.keys(ep).length > 0 ? ep : extractBlueprintSets(blueprint);
@@ -937,7 +997,9 @@ async function executeTool(name, input) {
       const found = findItemWithParent(cloneValue(rootValue), input.id);
       if (found?.item?.type) {
         resolvedSetType = found.item.type;
-        const cachedFields = cachedSetsSnapshot[resolvedSetType]?.fields;
+        resolvedParentType = found.parentType ?? null;
+        resolvedParentField = found.parentField ?? null;
+        const cachedFields = findSetDefInTree(cachedSetsSnapshot, resolvedSetType, resolvedParentType, resolvedParentField)?.fields;
         if (cachedFields) {
           itemFieldTypes = Object.fromEntries(
             cachedFields.filter(f => f.handle && f.type).map(f => [f.handle, f.type])
@@ -980,15 +1042,15 @@ async function executeTool(name, input) {
       return fv; // leave unknown types as-is (caller handles bard/grid separately)
     };
     // Normalize a replicator sub-item array: infer missing type, coerce textarea→string, asset string→array.
-    const normalizeSubItems = (items, parentSetType) => {
+    const normalizeSubItems = (items, parentSetType, fieldHandle) => {
       if (!Array.isArray(items)) return items;
-      const childSets = Object.values(cachedSetsSnapshot).filter(s => s._parent_set === parentSetType);
-      const singleChildType = childSets.length === 1 ? childSets[0].handle : null;
+      const childTypes = fieldHandle ? getChildTypes(cachedSetsSnapshot, parentSetType, fieldHandle) : [];
+      const singleChildType = childTypes.length === 1 ? childTypes[0] : null;
       return items.map(item => {
         if (!item || typeof item !== 'object') return item;
         const resolvedType = item.type ?? singleChildType;
         if (!resolvedType) return { _id: item._id ?? uid(), enabled: item.enabled ?? true, ...item };
-        const setDef = cachedSetsSnapshot[resolvedType];
+        const setDef = findSetDefInTree(cachedSetsSnapshot, resolvedType, parentSetType, fieldHandle);
         const setFieldTypes = setDef?.fields
           ? Object.fromEntries(setDef.fields.filter(f => f.handle && f.type).map(f => [f.handle, f.type]))
           : {};
@@ -1040,12 +1102,12 @@ async function executeTool(name, input) {
       }
       // Normalize replicator sub-items: infer type, coerce textarea→string, asset string→array.
       if (effectiveType === 'replicator' && Array.isArray(v) && resolvedSetType) {
-        normalizedFields[effectiveKey] = normalizeSubItems(v, resolvedSetType);
+        normalizedFields[effectiveKey] = normalizeSubItems(v, resolvedSetType, effectiveKey);
         continue;
       }
       // Grid rows: normalize each row (add _id, coerce bard/assets values).
       if (effectiveType === 'grid' && Array.isArray(v)) {
-        const gridFieldDef = cachedSetsSnapshot[resolvedSetType]?.fields?.find(f => f.handle === effectiveKey);
+        const gridFieldDef = findSetDefInTree(cachedSetsSnapshot, resolvedSetType, resolvedParentType, resolvedParentField)?.fields?.find(f => f.handle === effectiveKey);
         const rowFieldTypes = gridFieldDef?.fields
           ? Object.fromEntries(gridFieldDef.fields.filter(f => f.handle && f.type).map(f => [f.handle, f.type]))
           : {};
@@ -1065,7 +1127,7 @@ async function executeTool(name, input) {
       ([k, v]) => itemFieldTypes[k] === 'grid' && Array.isArray(v)
     );
     for (const [gridHandle, rows] of gridFetchEntries) {
-      const gridFieldDef = cachedSetsSnapshot[resolvedSetType]?.fields?.find(f => f.handle === gridHandle);
+      const gridFieldDef = findSetDefInTree(cachedSetsSnapshot, resolvedSetType, resolvedParentType, resolvedParentField)?.fields?.find(f => f.handle === gridHandle);
       const rowFieldTypes = gridFieldDef?.fields
         ? Object.fromEntries(gridFieldDef.fields.filter(f => f.handle && f.type).map(f => [f.handle, f.type]))
         : {};
@@ -1102,7 +1164,7 @@ async function executeTool(name, input) {
           for (const repItems of Object.values(replicatorUpdates)) {
             for (const repItem of repItems) {
               if (!repItem?._id) continue;
-              const itemSetDef = cachedSetsSnapshot[repItem.type];
+              const itemSetDef = findSetDefInTree(cachedSetsSnapshot, repItem.type, resolvedSetType, null);
               const nestedGridUpdates = {};
               for (const [fk, fv] of Object.entries(repItem)) {
                 if (!Array.isArray(fv) || !fv.length) continue;
@@ -1146,10 +1208,11 @@ async function executeTool(name, input) {
     // (e.g. section type "text" and tile type "text" both have handle "text").
     // An empty replicator field won't appear in `values` — treat it as top-level if it's a
     // known root field according to the endpoint blueprint or the Vuex-derived map.
+    // cachedSets is now a nested tree: { rootField: { setHandle: {...} } }
     const cachedSets = blueprintDataProvider?.()?.sets ?? {};
     const hasCached = Object.keys(cachedSets).length > 0;
     const knownRootFields = new Set([
-      ...Object.values(cachedSets).map((s) => s._root_field).filter(Boolean),
+      ...getTreeRootFields(cachedSets),
       ...Object.values(blueprint ? buildRootFieldMap(blueprint) : {}),
     ]);
     const isTopLevel = typeof parent === 'string' && (parent in values || knownRootFields.has(parent));
@@ -1158,12 +1221,9 @@ async function executeTool(name, input) {
     // Endpoint data is authoritative; fall back to Vuex-derived validation.
     if (isTopLevel) {
       if (hasCached) {
-        const requestedSet = cachedSets[type];
-        const correctField = requestedSet?._root_field;
-        const validForField = Object.entries(cachedSets)
-          .filter(([, s]) => s._root_field === parent && !s._parent_set)
-          .map(([t]) => t);
+        const validForField = getTopLevelTypesForField(cachedSets, parent);
         if (validForField.length > 0 && !validForField.includes(type)) {
+          const correctField = getRootFieldForType(cachedSets, type);
           const suggestion = correctField ? ` Use parent: "${correctField}" instead.` : '';
           return { error: `Type "${type}" is not valid for field "${parent}".${suggestion} Valid types for "${parent}": [${validForField.join(', ')}]` };
         }
@@ -1184,7 +1244,7 @@ async function executeTool(name, input) {
     const defaults = buildItemDefaults(blueprint, type, nestedParentType);
     // Field types from Vuex blueprint (may miss imported fieldsets); merge with endpoint blueprint.
     const vuexFieldTypes = getSetFieldTypes(blueprint, type, nestedParentType);
-    const endpointFields = cachedSets[type]?.fields ?? [];
+    const endpointFields = findSetDefInTree(cachedSets, type, nestedParentType, field)?.fields ?? [];
     const endpointFieldTypes = Object.fromEntries(
       endpointFields.filter(f => f.handle && f.type).map(f => [f.handle, f.type])
     );
@@ -1196,17 +1256,17 @@ async function executeTool(name, input) {
         return { error: `Field "${k}" is a ${fieldTypes[k]} field — value must be a plain option key string, never an object or array. Got: ${JSON.stringify(v)}` };
       }
     }
-    // Build a snapshot of all set definitions so replicator sub-items can have type inferred.
+    // allSetsForAdd is the nested tree used by normalizeAddSubItem.
     const allSetsForAdd = hasCached ? cachedSets : extractBlueprintSets(blueprint);
     // Normalize a single replicator sub-item: infer missing type, fix headline↔title alias,
     // coerce string fields, wrap bare asset strings in arrays.
-    const normalizeAddSubItem = (item, parentSetType) => {
+    const normalizeAddSubItem = (item, parentSetType, parentFieldHandle) => {
       if (!item || typeof item !== 'object') return item;
-      const childSets = Object.values(allSetsForAdd).filter((s) => s._parent_set === parentSetType);
-      const singleChildType = childSets.length === 1 ? childSets[0].handle : null;
+      const childTypes = parentFieldHandle ? getChildTypes(allSetsForAdd, parentSetType, parentFieldHandle) : [];
+      const singleChildType = childTypes.length === 1 ? childTypes[0] : null;
       const resolvedType = item.type ?? singleChildType;
       if (!resolvedType) return { _id: uid(), enabled: true, ...item };
-      const setDef = allSetsForAdd[resolvedType];
+      const setDef = findSetDefInTree(allSetsForAdd, resolvedType, parentSetType, parentFieldHandle);
       const setFTypes = setDef?.fields
         ? Object.fromEntries(setDef.fields.filter((f) => f.handle && f.type).map((f) => [f.handle, f.type]))
         : {};
@@ -1237,10 +1297,10 @@ async function executeTool(name, input) {
       }).map(([k, v]) => {
         if (STRING_FIELD_TYPES.has(fieldTypes[k]) && Array.isArray(v)) return [k, bardArrayToPlainText(v)];
         if (Array.isArray(v) && fieldTypes[k] === 'replicator') {
-          return [k, v.map((item) => normalizeAddSubItem(item, type))];
+          return [k, v.map((item) => normalizeAddSubItem(item, type, k))];
         }
         if (Array.isArray(v) && fieldTypes[k] === 'grid') {
-          const gridFieldDef = allSetsForAdd[type]?.fields?.find(f => f.handle === k);
+          const gridFieldDef = findSetDefInTree(allSetsForAdd, type, nestedParentType, field)?.fields?.find(f => f.handle === k);
           const rowFieldTypes = gridFieldDef?.fields
             ? Object.fromEntries(gridFieldDef.fields.filter(f => f.handle && f.type).map(f => [f.handle, f.type]))
             : {};
@@ -1291,16 +1351,12 @@ async function executeTool(name, input) {
       const parentFound = findItemWithParent(cloned, parent);
       if (parentFound) {
         const parentType = parentFound.item?.type;
-        if (parentType && blueprint) {
+        if (parentType) {
           const allSets = hasCached ? cachedSets : extractBlueprintSets(blueprint);
-          const requestedSet = allSets[type];
-          if (requestedSet?._parent_set && requestedSet._parent_set !== parentType) {
-            const validTypes = Object.values(allSets)
-              .filter((s) => s._parent_set === parentType)
-              .map((s) => s.handle)
-              .join(', ');
+          const childTypes = getChildTypes(allSets, parentType, field);
+          if (childTypes.length > 0 && !childTypes.includes(type)) {
             return {
-              error: `Type "${type}" is only valid inside "${requestedSet._parent_set}" sections. Parent "${parent}" is type "${parentType}". Valid types for "${parentType}": [${validTypes || 'see blueprint in context'}]`,
+              error: `Type "${type}" is not valid inside "${parentType}.${field}". Valid types: [${childTypes.join(', ')}]`,
             };
           }
         }
@@ -1631,7 +1687,7 @@ BRIEF: The brief is rebuilt after every write operation and always reflects curr
 HIERARCHY: The word "section" always means a top-level entry in the sections (or equivalent) array. Items nested inside a section (tiles, accordion items, etc.) are sub-items — not sections themselves. When looking for a section by type, only consider top-level entries.
 READING: The brief contains every item's _id, type, and key content. Do NOT call get_item before delete, move, or update_item — derive the _id from the brief. Only call get_item when you need full raw data not in the brief (e.g. complete ProseMirror nodes of a bard field you intend to edit).
 UPDATING: update_item patches any item at any depth by _id. To update a tile, accordion item, or any nested item, use its own _id directly — no need to reconstruct the parent array. For top-level scalar fields (title, date, slug, etc.) use update_field.
-ADDING: add_item takes parent + type. For top-level items use the root field handle as parent — read the _root_field value on the set type you want from the blueprint provided in your context (e.g. schema_set has _root_field:"schema", not "sections"). For nested items (e.g. a tile inside a section) use the parent item's _id as parent and set field to the replicator field name (e.g. "tiles"). The optional fields parameter is for scalar values (text, numbers, asset strings). If you pre-populate a nested replicator array via fields (e.g. fields.steps), every sub-item in that array MUST include "type" (the set handle from the blueprint) — _id and enabled are injected automatically. The same rule applies when using update_item to set a replicator field: every item in the array must include "type". Example: update_item(id, {steps:[{type:"step",title:"...",text:"..."},...]}). Omitting "type" causes silent render errors in the editor.
+ADDING: add_item takes parent + type. For top-level items use the root field handle as parent — look it up in the blueprint tree in your context: the top-level keys of the "sets" object are the root field handles (e.g. if a type appears under sets.schema, use parent="schema", not "sections"). For nested items (e.g. a tile inside a section) use the parent item's _id as parent and set field to the replicator field name (e.g. "tiles"). The optional fields parameter is for scalar values (text, numbers, asset strings). If you pre-populate a nested replicator array via fields (e.g. fields.steps), every sub-item in that array MUST include "type" (the set handle from the blueprint) — _id and enabled are injected automatically. The same rule applies when using update_item to set a replicator field: every item in the array must include "type". Example: update_item(id, {steps:[{type:"step",title:"...",text:"..."},...]}). Omitting "type" causes silent render errors in the editor.
 BARD FIELDS use ProseMirror JSON. Bard fields cannot be set during add_item — they are always initialized empty. If you pass bard content in add_item fields, the response will include "set_bard_fields" listing the skipped fields; immediately follow up with update_item calls (in parallel) to set those fields. For existing items, always call get_item first to read the current structure before editing. ProseMirror rules: text leaf nodes are {"type":"text","text":"..."} (never "value"); paragraphs are {"type":"paragraph","content":[{"type":"text","text":"..."}]}; headings are {"type":"heading","attrs":{"level":2,"textAlign":"left"},"content":[...]}; bard set nodes use {"type":"set","attrs":{"id":"...","values":{...}}} where values holds the set fields. IMAGES in bard: never use {"type":"image",...} inline nodes — that TipTap extension is not active. Embed images as bard sets: {"type":"set","attrs":{"id":"...","values":{"type":"image","enabled":true,"image":["assets::path/to/file.jpg"]}}}.
 ASSET FIELDS always store values as arrays of "assets::..." strings — even when max_files is 1. Example: ["assets::praxis/image.jpg"]. Always include the assets:: prefix on each string. When using add_item fields for a top-level asset field you may pass a bare string and it will be auto-wrapped; but when setting an asset field inside a grid row or a replicator item via update_item you MUST pass an array: {image:["assets::path/to/file.jpg"]}. Always call search_assets to verify a path before using it.
 GRID FIELDS (e.g. "rows" in a table group, "icons" in an icons tile) are flat arrays — each row has no _id and cannot use add_item. To populate a grid field use update_item on the parent item with the full array value. Asset fields within grid rows must be arrays: {image:["assets::path.jpg"],text:"..."}. Example icons: update_item(iconsTileId,{icons:[{image:["assets::img.jpg"],text:"Label"},...]}). Example table rows: update_item(sectionId,{rows:[{label:"Label",text:[{type:"paragraph",content:[{type:"text",text:"Value"}]}]},...]}).
@@ -1644,14 +1700,22 @@ When passing a complex object or array as a tool argument value, pass it as a na
 
   // Get blueprint — prefer the endpoint-fetched cache (fully resolves imported fieldsets),
   // fall back to Vuex-derived extraction.
-  const bpCached = blueprintDataProvider?.()?.sets;
-  const blueprintSets = (bpCached && Object.keys(bpCached).length > 0)
-    ? bpCached
+  const bpData = blueprintDataProvider?.();
+  const bpCachedSets = bpData?.sets;
+  const blueprintSets = (bpCachedSets && Object.keys(bpCachedSets).length > 0)
+    ? bpCachedSets
     : (() => {
         const bp = getPublishStore(window.Statamic)?.blueprint;
         return bp ? extractBlueprintSets(bp) : null;
       })();
-  const blueprintJson = blueprintSets ? JSON.stringify(blueprintSets) : null;
+  // Plain (non-replicator) fields: title, slug, SEO meta, etc. Only available from the
+  // PHP endpoint cache — the Vuex fallback doesn't expose them.
+  const blueprintFields = (bpData?.fields && Object.keys(bpData.fields).length > 0)
+    ? bpData.fields
+    : null;
+  const blueprintJson = (blueprintSets || blueprintFields)
+    ? JSON.stringify({ ...(blueprintFields ? { fields: blueprintFields } : {}), ...(blueprintSets ? { sets: blueprintSets } : {}) })
+    : null;
 
   const blocks = [
     { type: 'text', text: staticText, cache_control: { type: 'ephemeral' } },
@@ -1662,7 +1726,7 @@ When passing a complex object or array as a tool argument value, pass it as a na
     // blueprint tokens cached (0.1× cost) across all rounds in the same build session.
     blocks.push({
       type: 'text',
-      text: `Blueprint (all available item types with _root_field, _parent_set, field handles and types):\n\`\`\`json\n${blueprintJson}\n\`\`\``,
+      text: `Blueprint ("fields" = all plain fields for this entry type including title, slug, SEO etc — use update_field/get_field on these; "sets" = nested tree of replicator/bard types, keys are root field handles):\n\`\`\`json\n${blueprintJson}\n\`\`\``,
       cache_control: { type: 'ephemeral' },
     });
   }
@@ -1675,10 +1739,10 @@ When passing a complex object or array as a tool argument value, pass it as a na
 }
 
 export function getAiBlueprintSets() {
-  const bpCached = blueprintDataProvider?.()?.sets;
-  if (bpCached && Object.keys(bpCached).length > 0) return bpCached;
+  const bpData = blueprintDataProvider?.();
+  if (bpData && (Object.keys(bpData.sets ?? {}).length > 0 || Object.keys(bpData.fields ?? {}).length > 0)) return bpData;
   const bp = getPublishStore(window.Statamic)?.blueprint;
-  return bp ? extractBlueprintSets(bp) : null;
+  return bp ? { sets: extractBlueprintSets(bp) } : null;
 }
 
 function mountBardEditor(container) {

@@ -66,44 +66,30 @@ class ServiceProvider extends AddonServiceProvider
                 $OPTION_TYPES     = ['select', 'radio', 'button_group', 'checkboxes', 'dictionary'];
                 $REPLICATOR_TYPES = ['replicator', 'bard'];
 
-                // Recursively flatten set definitions from a raw sets config array.
-                // Handles both flat sets and grouped sets (Statamic 4 groups).
-                $allSets    = [];
-                $extractSets = null;
-                $extractSets = function (array $rawSets, string $rootField, ?string $parentSet) use (
-                    &$extractSets, &$allSets, $OPTION_TYPES, $REPLICATOR_TYPES
-                ) {
+                // Recursively build one level of the sets tree from a raw sets config array.
+                // Returns { setHandle => { display, fields, sets? } } — no _root_field or
+                // _parent_set needed; location in the tree encodes that context exactly.
+                $extractSetsLevel = null;
+                $extractSetsLevel = function (array $rawSets) use (
+                    &$extractSetsLevel, $OPTION_TYPES, $REPLICATOR_TYPES
+                ): array {
+                    $level = [];
                     foreach ($rawSets as $key => $config) {
                         if (!is_array($config)) continue;
 
-                        // Statamic 4 group: { display, sets: { set_handle: {...} } }
+                        // Statamic 4 group: { display, sets: {...} } without fields
                         if (isset($config['sets']) && is_array($config['sets']) && !isset($config['fields'])) {
-                            $extractSets($config['sets'], $rootField, $parentSet);
+                            $level = array_merge($level, $extractSetsLevel($config['sets']));
                             continue;
                         }
 
-                        // Transparent wrapper (no display/fields/sets at this level):
-                        // Statamic may emit an extra nesting layer, e.g. { sets: { group: {...} } }.
-                        // Recurse into the value so inner groups/set-types are found.
+                        // Transparent wrapper — recurse into its values
                         if (!isset($config['fields'])) {
-                            $extractSets($config, $rootField, $parentSet);
+                            $level = array_merge($level, $extractSetsLevel($config));
                             continue;
                         }
 
-                        // Set type: { display, fields: [...] }
-                        $setFields = [];
-                        // Expand the raw field list: inline entries stay as-is, while
-                        // `import: fieldset_handle` entries are replaced by the raw field
-                        // configs from that fieldset so the loop below handles them uniformly.
-                        // NOTE: Only one level of imports is expanded here. If an imported
-                        // fieldset itself contains `import:` directives, those inner imports
-                        // still have no `handle` and will be skipped by the loop below.
-                        // Recursive import expansion is not implemented but may be needed
-                        // if blueprints grow deeper import chains.
-                        //
-                        // The loop also handles the `field: "fieldset_handle.field_handle"`
-                        // single-field reference pattern (case b), which is already resolved
-                        // by the code below using Fieldset::find(). Both patterns are covered.
+                        // Set type: expand fieldset imports first
                         $expandedFieldConfigs = [];
                         foreach ($config['fields'] ?? [] as $fc) {
                             if (!isset($fc['handle']) && !empty($fc['import'])) {
@@ -117,19 +103,19 @@ class ServiceProvider extends AddonServiceProvider
                                 $expandedFieldConfigs[] = $fc;
                             }
                         }
+
+                        $setFields  = [];
+                        $nestedSets = []; // fieldHandle => sets level
+
                         foreach ($expandedFieldConfigs as $fieldConfig) {
                             $fieldHandle = $fieldConfig['handle'] ?? null;
                             if (!$fieldHandle) continue;
 
-                            // Field def may be:
-                            //   (a) an inline array definition under 'field' key
-                            //   (b) a "fieldset.handle" string reference under 'field' key
-                            //   (c) flat (no 'field' key, definition is the config itself)
+                            // Field def may be inline, a "fieldset.handle" reference, or flat.
                             $fieldRef = $fieldConfig['field'] ?? null;
                             if (is_array($fieldRef)) {
                                 $fieldDef = $fieldRef;
                             } elseif (is_string($fieldRef) && str_contains($fieldRef, '.')) {
-                                // Resolve "fieldset_handle.field_handle" references.
                                 [$fsHandle, $fsFieldHandle] = explode('.', $fieldRef, 2);
                                 $fs = \Statamic\Facades\Fieldset::find($fsHandle);
                                 $resolved = $fs?->fields()->all()[$fsFieldHandle] ?? null;
@@ -140,6 +126,7 @@ class ServiceProvider extends AddonServiceProvider
                             } else {
                                 $fieldDef = $fieldConfig;
                             }
+
                             $fieldType = $fieldDef['type'] ?? '';
                             $slim      = ['handle' => $fieldHandle];
                             if ($fieldType)                                    $slim['type']            = $fieldType;
@@ -150,8 +137,7 @@ class ServiceProvider extends AddonServiceProvider
                             if (in_array($fieldType, $OPTION_TYPES, true) && !empty($fieldDef['options'])) {
                                 $slim['options'] = $fieldDef['options'];
                             }
-                            // Include sub-field types for grid fields so the JS normalizer can
-                            // coerce bard/assets values within grid rows correctly.
+                            // Grid sub-field types so JS normalizer can coerce bard/assets inside rows.
                             if ($fieldType === 'grid' && !empty($fieldDef['fields'])) {
                                 $gridSubFields = [];
                                 foreach ($fieldDef['fields'] as $gfc) {
@@ -180,25 +166,27 @@ class ServiceProvider extends AddonServiceProvider
                             }
                             $setFields[] = $slim;
 
-                            // Recurse into nested replicators/bards within this set
+                            // Nested replicator/bard: recurse and attach as sets[fieldHandle]
                             if (in_array($fieldType, $REPLICATOR_TYPES, true) && !empty($fieldDef['sets'])) {
-                                $extractSets($fieldDef['sets'], $rootField, $key);
+                                $nested = $extractSetsLevel($fieldDef['sets']);
+                                if (!empty($nested)) $nestedSets[$fieldHandle] = $nested;
                             }
                         }
 
                         $entry = [
-                            'handle'      => $key,
-                            'display'     => $config['display'] ?? $key,
-                            '_root_field' => $rootField,
-                            'fields'      => $setFields,
+                            'handle'  => $key,
+                            'display' => $config['display'] ?? $key,
+                            'fields'  => $setFields,
                         ];
-                        if ($parentSet !== null) $entry['_parent_set'] = $parentSet;
-                        $allSets[$key] = $entry;
+                        if (!empty($nestedSets)) $entry['sets'] = $nestedSets;
+                        $level[$key] = $entry;
                     }
+                    return $level;
                 };
 
-                // Top-level fields + trigger set extraction for replicator/bard fields
+                // Build top-level fields dict and nested sets tree keyed by root field handle.
                 $fields = [];
+                $tree   = [];
                 foreach ($bp->fields()->all() as $handle => $field) {
                     $type    = $field->type();
                     $display = $field->display();
@@ -213,11 +201,14 @@ class ServiceProvider extends AddonServiceProvider
 
                     if (in_array($type, $REPLICATOR_TYPES, true)) {
                         $rawSets = $field->config('sets') ?? [];
-                        if ($rawSets) $extractSets($rawSets, $handle, null);
+                        if ($rawSets) {
+                            $level = $extractSetsLevel($rawSets);
+                            if (!empty($level)) $tree[$handle] = $level;
+                        }
                     }
                 }
 
-                return response()->json(['fields' => $fields, 'sets' => $allSets]);
+                return response()->json(['fields' => $fields, 'sets' => $tree]);
             });
 
             Route::get('section-tools/assets/search', function (Request $request) {
