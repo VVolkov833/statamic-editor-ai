@@ -181,18 +181,13 @@ import { getPublishStore as libGetPublishStore, buildPageBrief as libBuildPageBr
     btn.id = LP_BTN_ID;
     btn.type = 'button';
     btn.className = 'btn';
-    btn.style.cssText = 'margin-left:8px;display:inline-flex;align-items:center;gap:4px';
+    btn.style.cssText = 'margin-right:8px;display:inline-flex;align-items:center;flex-shrink:0';
     btn.setAttribute('aria-label', 'Toggle AI Assistant');
     btn.title = 'Toggle AI Assistant';
-    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> AI`;
+    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
     btn.addEventListener('click', () => togglePanelVisibility(panelStorageKey));
 
-    const closeBtn = flexRow.querySelector('.btn-close');
-    if (closeBtn) {
-      flexRow.insertBefore(btn, closeBtn);
-    } else {
-      flexRow.appendChild(btn);
-    }
+    flexRow.prepend(btn);
   }
 
   function syncButtons() {

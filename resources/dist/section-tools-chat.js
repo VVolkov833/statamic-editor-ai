@@ -1575,9 +1575,7 @@ function setTechnicalVisibility(historyEl, visible) {
 }
 
 function updateTokenDisplay(tokenEl) {
-  const parts = [`↑${totalInputTokens} ↓${totalOutputTokens}`];
-  if (totalCacheReadTokens) parts.push(`+${totalCacheReadTokens} cached`);
-  tokenEl.textContent = parts.join('  ') + ' tokens';
+  tokenEl.textContent = `↑${totalInputTokens} ↓${totalOutputTokens}  +${totalCacheReadTokens} tokens`;
 }
 
 function buildSystemPrompt(getBrief) {
@@ -1645,7 +1643,7 @@ function mountBardEditor(container) {
   if (!document.getElementById('st-bard-doc-style')) {
     const s = document.createElement('style');
     s.id = 'st-bard-doc-style';
-    s.textContent = '.st-doc-bard{display:flex;flex-direction:column;flex:1;min-height:0}.st-doc-bard>div,.st-doc-bard>div>div,.st-doc-bard>div>div>div{display:flex;flex-direction:column;flex:1;min-height:0}.st-doc-bard .bard-editor .ProseMirror{min-height:80px;overflow-y:auto;padding:6px 8px;outline:none}.st-doc-bard .bard-fieldtype-wrapper{border:1px solid rgba(0,0,0,0.15);border-radius:4px;display:flex;flex-direction:column;flex:1;min-height:0}.st-doc-bard .bard-editor{display:flex;flex-direction:column;flex:1;min-height:0}.st-doc-bard .bard-content{flex:1;min-height:0;overflow-y:auto}.st-doc-bard .bard-content ul{list-style-type:disc;padding-left:1.5em;margin:.3em 0}.st-doc-bard .bard-content ol{list-style-type:decimal;padding-left:1.5em;margin:.3em 0}.st-doc-bard .bard-content li{margin:.1em 0}.st-doc-bard .bard-content blockquote{border-left:3px solid rgba(0,0,0,0.25);padding-left:.75em;margin:.3em 0;color:rgba(0,0,0,0.6);font-style:italic}.st-doc-bard .bard-content table{border-collapse:collapse;width:100%;margin:.5em 0}.st-doc-bard .bard-content td,.st-doc-bard .bard-content th{border:1px solid rgba(0,0,0,0.2);padding:4px 8px;min-width:2em}.st-doc-bard .bard-content th{background:rgba(0,0,0,0.04);font-weight:600}.st-doc-portals .popover{z-index:100}.st-doc-portals .stack{z-index:100}.st-doc-bard .bard-content a{color:#43a9ff;text-decoration:underline}';
+    s.textContent = '.st-doc-bard{position:relative;flex:1;min-height:0}.st-doc-bard .bard-fieldtype-wrapper{position:absolute;inset:0;display:flex;flex-direction:column;border:1px solid rgba(0,0,0,0.15);border-radius:4px;overflow:hidden}.st-doc-bard .bard-fixed-toolbar{flex-shrink:0}.st-doc-bard .bard-editor{display:flex;flex-direction:column;flex:1;min-height:0}.st-doc-bard .bard-editor>div{display:flex;flex-direction:column;flex:1;min-height:0}.st-doc-bard .bard-editor .ProseMirror{flex:1;min-height:80px;overflow-y:auto;padding:6px 8px;outline:none}.st-doc-bard .bard-content{overflow-y:auto}.st-doc-bard .bard-content ul{list-style-type:disc;padding-left:1.5em;margin:.3em 0}.st-doc-bard .bard-content ol{list-style-type:decimal;padding-left:1.5em;margin:.3em 0}.st-doc-bard .bard-content li{margin:.1em 0}.st-doc-bard .bard-content blockquote{border-left:3px solid rgba(0,0,0,0.25);padding-left:.75em;margin:.3em 0;color:rgba(0,0,0,0.6);font-style:italic}.st-doc-bard .bard-content table{border-collapse:collapse;width:100%;margin:.5em 0}.st-doc-bard .bard-content td,.st-doc-bard .bard-content th{border:1px solid rgba(0,0,0,0.2);padding:4px 8px;min-width:2em}.st-doc-bard .bard-content th{background:rgba(0,0,0,0.04);font-weight:600}.st-doc-portals .popover{z-index:100}.st-doc-portals .stack{z-index:100}.st-doc-bard .bard-content a{color:#43a9ff;text-decoration:underline}';
     document.head.appendChild(s);
   }
   container.classList.add('st-doc-bard');
@@ -1892,7 +1890,7 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
   sendBtn.type = 'button';
   sendBtn.className = 'btn btn-primary';
   sendBtn.textContent = 'Send';
-  sendBtn.style.alignSelf = 'stretch';
+  sendBtn.style.height = '100%';
 
   const tokenInfo = document.createElement('div');
   tokenInfo.style.fontSize = '10px';
@@ -2011,8 +2009,8 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
   appendBtn.textContent = 'add to page';
   appendBtn.addEventListener('click', () => doBuild('append'));
 
-  docHeaderButtons.appendChild(clearDocBtn);
   docHeaderButtons.appendChild(uploadBtn);
+  docHeaderButtons.appendChild(clearDocBtn);
 
   docBtnRow.appendChild(docxInput);
   docBtnRow.appendChild(appendBtn);
