@@ -1829,8 +1829,17 @@ function mountBardEditor(container) {
   };
 }
 
+const SPINNER_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="animation:st-spin 0.7s linear infinite;display:inline-block;vertical-align:-2px"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2.5" stroke-opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>';
+
 export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
   blueprintDataProvider = getBlueprintData ?? null;
+
+  if (!document.getElementById('st-anim-css')) {
+    const s = document.createElement('style');
+    s.id = 'st-anim-css';
+    s.textContent = '@keyframes st-spin{to{transform:rotate(360deg)}}@keyframes st-dot{0%,60%,100%{opacity:.2}30%{opacity:1}}';
+    document.head.appendChild(s);
+  }
   const _initState = panelStorageKey ? readPanelState(panelStorageKey) : {};
   let showTechnical = _initState.showTechnical ?? false;
 
@@ -1948,6 +1957,7 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
     totalOutputTokens = 0;
     totalCacheReadTokens = 0;
     history.innerHTML = '';
+    stepInfo.textContent = '';
     updateTokenDisplay(tokenInfo);
   }
 
@@ -2003,17 +2013,25 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
   sendBtn.textContent = 'Send';
   sendBtn.style.height = '100%';
 
-  const tokenInfo = document.createElement('div');
+  const tokenInfo = document.createElement('span');
   tokenInfo.style.fontSize = '10px';
   tokenInfo.style.color = 'rgba(0,0,0,0.35)';
-  tokenInfo.style.textAlign = 'right';
   updateTokenDisplay(tokenInfo);
+
+  const stepInfo = document.createElement('span');
+  stepInfo.style.fontSize = '10px';
+  stepInfo.style.color = 'rgba(0,0,0,0.35)';
+
+  const statusRow = document.createElement('div');
+  statusRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center';
+  statusRow.appendChild(stepInfo);
+  statusRow.appendChild(tokenInfo);
 
   inputRow.appendChild(textarea);
   inputRow.appendChild(sendBtn);
   chatView.appendChild(history);
   chatView.appendChild(inputRow);
-  chatView.appendChild(tokenInfo);
+  chatView.appendChild(statusRow);
 
   // Document view
   const documentView = document.createElement('div');
@@ -2183,7 +2201,7 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
     sendBtn.disabled = true;
     replaceBtn.disabled = true;
     appendBtn.disabled = true;
-    sendBtn.textContent = '…';
+    sendBtn.innerHTML = SPINNER_SVG;
 
     const displayText = customText && customText.length > 120
       ? customText.slice(0, 120) + '…'
@@ -2193,6 +2211,9 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
     messages.push({ role: 'user', content: userContent });
     appendMessage(history, 'user', displayText);
 
+    let thinkingEl = appendMessage(history, 'assistant', '');
+    thinkingEl.innerHTML = '<span style="font-size:16px;letter-spacing:3px;line-height:1"><span style="display:inline-block;animation:st-dot 1.2s ease-in-out infinite">•</span><span style="display:inline-block;animation:st-dot 1.2s ease-in-out 0.3s infinite">•</span><span style="display:inline-block;animation:st-dot 1.2s ease-in-out 0.6s infinite">•</span></span>';
+
     let systemPrompt = buildSystemPrompt(getBrief);
     const msgCountBefore = messages.length;
 
@@ -2201,7 +2222,7 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
       let finalText = null;
 
       for (let round = 0; round < maxRounds; round++) {
-        if (round > 0) sendBtn.textContent = `step ${round + 1}/${maxRounds}…`;
+        stepInfo.textContent = `⟳ ${round + 1} / ${maxRounds}`;
 
         const data = await sendToClaude(messages, systemPrompt, AI_TOOLS, { maxTokens });
 
@@ -2290,9 +2311,13 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
 
       if (finalText === null) finalText = '[max steps reached]';
 
+      thinkingEl?.remove();
+      thinkingEl = null;
       messages.push({ role: 'assistant', content: finalText });
       appendMessage(history, 'assistant', finalText);
     } catch (err) {
+      thinkingEl?.remove();
+      thinkingEl = null;
       messages.splice(msgCountBefore);
       const display = err.message.includes('429')
         ? 'Rate limit hit — wait a few seconds and try again.'
@@ -2304,6 +2329,7 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
       replaceBtn.disabled = false;
       appendBtn.disabled = false;
       sendBtn.textContent = 'Send';
+      stepInfo.textContent = '';
       textarea.focus();
     }
   }
