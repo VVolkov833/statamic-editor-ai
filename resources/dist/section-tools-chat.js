@@ -98,7 +98,11 @@ function injectTopLevelItemMeta(statamic, rootHandle, newItemId, type,
   if (!rootFieldMeta) return;
 
   // Prefer copying from an existing item of the same type — Statamic initialized that meta
-  // correctly. Fall back to the new[type] template, then to blueprint-derived field stubs.
+  // correctly. Fall back to the new[type] template, then any existing meta entry (handles
+  // the case where Vuex meta persists after values are cleared — e.g. a max_sets=1 field
+  // that had an item: after clearing, new[type] is absent because Statamic omits templates
+  // for fields already at capacity, but existing still has the old item's meta with proper
+  // options arrays for select/radio fields). Last resort: blueprint-derived field stubs.
   let typeTemplate = null;
   const valuesArr = publishStore?.values?.[rootHandle];
   if (Array.isArray(valuesArr)) {
@@ -112,14 +116,39 @@ function injectTopLevelItemMeta(statamic, rootHandle, newItemId, type,
   if (!typeTemplate && rootFieldMeta?.new?.[type]) {
     typeTemplate = cloneValue(rootFieldMeta.new[type]);
   }
+  // Stale existing meta: values were cleared but meta was not reset. Any entry works as a
+  // template because field structure (including select options) stays the same across sessions.
+  if (!typeTemplate && rootFieldMeta?.existing) {
+    for (const itemMeta of Object.values(rootFieldMeta.existing)) {
+      if (itemMeta && typeof itemMeta === 'object' && Object.keys(itemMeta).length > 0) {
+        typeTemplate = cloneValue(itemMeta);
+        break;
+      }
+    }
+  }
   if (!typeTemplate) {
-    // Build stub from cached blueprint: each field handle → {} so field components
-    // receive a defined (if empty) meta object rather than undefined.
+    // Blueprint stub: for each field, borrow meta from any available source so select/radio
+    // fields get their 'options' array. Falls back to {} only if no source has that handle.
     const bpTree = blueprintDataProvider?.()?.sets ?? {};
     const setDef = findSetDefInTree(bpTree, type);
-    typeTemplate = setDef?.fields?.length
-      ? Object.fromEntries(setDef.fields.map((f) => [f.handle, {}]))
-      : {};
+    if (setDef?.fields?.length) {
+      const sources = [
+        ...Object.values(rootFieldMeta?.new ?? {}),
+        ...Object.values(rootFieldMeta?.existing ?? {}),
+      ];
+      typeTemplate = Object.fromEntries(
+        setDef.fields.map((f) => {
+          for (const src of sources) {
+            if (src?.[f.handle] && typeof src[f.handle] === 'object' && Object.keys(src[f.handle]).length > 0) {
+              return [f.handle, cloneValue(src[f.handle])];
+            }
+          }
+          return [f.handle, {}];
+        })
+      );
+    } else {
+      typeTemplate = {};
+    }
   }
 
   const newItemMeta = typeTemplate;
@@ -734,11 +763,17 @@ function buildItemDefaults(blueprint, type, parentType) {
 
   const defaults = {};
   const ARRAY_TYPES = new Set(['replicator', 'grid', 'bard', 'checkboxes', 'list', 'tags', 'assets']);
+  // select/radio/button_group/dictionary: must default to null, not undefined.
+  // SelectFieldtype.selectedOptions() checks `value === null` but not `=== undefined`,
+  // so an absent field causes `undefined.map(...)` crash when the item is first rendered.
+  const NULL_TYPES = new Set(['select', 'radio', 'button_group', 'dictionary']);
   for (const field of best.fields) {
     if (!field.handle) continue;
     const fieldType = field.type ?? field.component ?? '';
     if (ARRAY_TYPES.has(fieldType)) {
       defaults[field.handle] = [];
+    } else if (NULL_TYPES.has(fieldType)) {
+      defaults[field.handle] = null;
     } else if (Object.prototype.hasOwnProperty.call(field, 'default') && field.default != null) {
       defaults[field.handle] = field.default;
     }
@@ -1187,10 +1222,13 @@ async function executeTool(name, input) {
           injectNestedGridRowsMeta(window.Statamic, rootHandle, input.id, gridUpdates, gridRowAssetData);
         }
         pushUndoSnapshot();
-        commitField(window.Statamic, rootHandle, cloned);
+        // Inject bard-set meta BEFORE committing values so Vue mounts set components
+        // (e.g. buttons, image) with their meta already in place — select/radio fields
+        // call selectedOptions on init and crash if meta.options is undefined.
         if (Object.keys(bardFieldUpdates).length) {
           injectBardSetsMeta(window.Statamic, rootHandle, input.id, bardFieldUpdates);
         }
+        commitField(window.Statamic, rootHandle, cloned);
         syncCodeMirrorValues(window.Statamic, input.id, normalizedFields);
         return { ok: true, type };
       }
