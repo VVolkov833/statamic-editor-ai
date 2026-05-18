@@ -1526,6 +1526,37 @@ function renderMarkdown(text) {
   return html;
 }
 
+const MAX_MSG_HEIGHT = 120;
+const MAX_TECHNICAL_HEIGHT = 40;
+
+function addExpandToggle(el, bgColor, maxHeight = MAX_MSG_HEIGHT) {
+  setTimeout(() => {
+    if (el.scrollHeight <= maxHeight) return;
+    el.style.maxHeight = maxHeight + 'px';
+    el.style.overflow = 'hidden';
+
+    const fade = document.createElement('div');
+    fade.style.cssText = `position:absolute;bottom:0;left:0;right:0;height:28px;background:linear-gradient(transparent,${bgColor});pointer-events:none`;
+    el.appendChild(fade);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = '▾';
+    btn.style.cssText = 'position:absolute;bottom:2px;right:4px;background:none;border:none;cursor:pointer;font-size:12px;line-height:1;padding:0 2px;color:rgba(0,0,0,0.4);pointer-events:auto';
+
+    let expanded = false;
+    btn.addEventListener('click', () => {
+      expanded = !expanded;
+      el.style.maxHeight = expanded ? '' : maxHeight + 'px';
+      el.style.overflow = expanded ? '' : 'hidden';
+      fade.style.display = expanded ? 'none' : '';
+      btn.textContent = expanded ? '▴' : '▾';
+      if (!expanded) el.scrollIntoView({ block: 'nearest' });
+    });
+    el.appendChild(btn);
+  }, 0);
+}
+
 function appendMessage(historyEl, role, text) {
   const msg = document.createElement('div');
   msg.style.marginBottom = '4px';
@@ -1534,14 +1565,18 @@ function appendMessage(historyEl, role, text) {
   msg.style.fontSize = '12px';
   msg.style.lineHeight = '1.5';
   msg.style.wordBreak = 'break-word';
+  msg.style.position = 'relative';
+  msg.style.flexShrink = '0';
+
+  const bgColor = role === 'user' ? 'rgba(0,0,0,0.06)' : 'rgba(99,102,241,0.1)';
+  msg.style.background = bgColor;
 
   if (role === 'user') {
-    msg.style.background = 'rgba(0,0,0,0.06)';
     msg.style.marginLeft = '16px';
     msg.style.whiteSpace = 'pre-wrap';
     msg.textContent = text;
+    addExpandToggle(msg, '#f0f0f0');
   } else {
-    msg.style.background = 'rgba(99,102,241,0.1)';
     msg.style.marginRight = '16px';
     msg.innerHTML = renderMarkdown(text);
   }
@@ -1562,9 +1597,12 @@ function appendTechnical(historyEl, text, dimmer = false) {
   msg.style.color = dimmer ? 'rgba(0,0,0,0.25)' : 'rgba(0,0,0,0.38)';
   msg.style.wordBreak = 'break-all';
   msg.style.whiteSpace = 'pre-wrap';
+  msg.style.position = 'relative';
+  msg.style.flexShrink = '0';
   msg.textContent = text;
   historyEl.appendChild(msg);
   historyEl.scrollTop = historyEl.scrollHeight;
+  addExpandToggle(msg, '#fff', MAX_TECHNICAL_HEIGHT);
   return msg;
 }
 
