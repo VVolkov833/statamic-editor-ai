@@ -29,6 +29,7 @@ function appendDefaultActionButtons(container, actions) {
   container.appendChild(createButton('Log §2 Blueprint', actions.onLogSection2Blueprint));
   container.appendChild(createButton('Log Page Brief', actions.onLogPageBrief));
   container.appendChild(createButton('Search Assets', actions.onSearchAssets));
+  container.appendChild(createButton('Log AI Blueprint', actions.onLogAiBlueprint));
 }
 
 function createPanelGroup(actions) {

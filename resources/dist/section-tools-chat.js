@@ -1674,6 +1674,13 @@ When passing a complex object or array as a tool argument value, pass it as a na
   return blocks;
 }
 
+export function getAiBlueprintSets() {
+  const bpCached = blueprintDataProvider?.()?.sets;
+  if (bpCached && Object.keys(bpCached).length > 0) return bpCached;
+  const bp = getPublishStore(window.Statamic)?.blueprint;
+  return bp ? extractBlueprintSets(bp) : null;
+}
+
 function mountBardEditor(container) {
   const BardComp = window.Vue?.component?.('bard-fieldtype');
   if (!BardComp) return null;

@@ -15,6 +15,7 @@ import {
 } from './section-tools-queries';
 import { syncSectionToolsUi, persistPanelPositionOnResize, togglePanelVisibility } from './section-tools-panel';
 import { getPublishStore as libGetPublishStore, buildPageBrief as libBuildPageBrief } from './section-tools-lib';
+import { getAiBlueprintSets } from './section-tools-chat';
 
 (() => {
   const viteHost = window.location.hostname || '127.0.0.1';
@@ -205,6 +206,7 @@ import { getPublishStore as libGetPublishStore, buildPageBrief as libBuildPageBr
         onLogSection2Blueprint: logSection2Blueprint,
         onLogPageBrief: logPageBrief,
         onSearchAssets: logAssetSearch,
+        onLogAiBlueprint: () => console.log('[SectionTools] AI Blueprint (sent to cache):', getAiBlueprintSets()),
       },
     });
     injectTopBarButton();
