@@ -197,6 +197,10 @@ class ServiceProvider extends AddonServiceProvider
                         $options = $field->config('options');
                         if ($options) $entry['options'] = $options;
                     }
+                    if (in_array($type, $REPLICATOR_TYPES, true)) {
+                        $maxSets = $field->config('max_sets');
+                        if ($maxSets) $entry['max_sets'] = (int) $maxSets;
+                    }
                     $fields[$handle] = $entry;
 
                     if (in_array($type, $REPLICATOR_TYPES, true)) {

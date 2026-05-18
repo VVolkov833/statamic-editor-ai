@@ -1,5 +1,5 @@
 import { getPublishStore, uid, getPublishModuleNames, cloneValue, commitField, readPanelState, writePanelState } from './section-tools-lib.js';
-import { simplifyBlueprintNode, fetchAssetsForAI, extractBlueprintSets, validateSetTypeForField, buildRootFieldMap } from './section-tools-queries.js';
+import { fetchAssetsForAI, extractBlueprintSets, validateSetTypeForField, buildRootFieldMap } from './section-tools-queries.js';
 import { pushUndoSnapshot } from './section-tools-mutations.js';
 
 // inlineSubItems:  { fieldHandle: [subItems] } — replicator sub-items to inject in the same commit
@@ -1217,6 +1217,17 @@ async function executeTool(name, input) {
     ]);
     const isTopLevel = typeof parent === 'string' && (parent in values || knownRootFields.has(parent));
 
+    // Enforce max_sets on root replicator fields (e.g. header has max_sets: 1).
+    if (isTopLevel) {
+      const maxSets = blueprintDataProvider?.()?.fields?.[parent]?.max_sets;
+      if (maxSets != null) {
+        const currentCount = Array.isArray(values[parent]) ? values[parent].length : 0;
+        if (currentCount >= maxSets) {
+          return { error: `Field "${parent}" already has its maximum number of items (${currentCount}/${maxSets}). Use update_item to edit the existing item instead.` };
+        }
+      }
+    }
+
     // Validate the type against the target field's allowed set types.
     // Endpoint data is authoritative; fall back to Vuex-derived validation.
     if (isTopLevel) {
@@ -2084,7 +2095,42 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
     uploadBtn.disabled = true;
     try {
       const arrayBuffer = await file.arrayBuffer();
-      const { value: html } = await window.mammoth.convertToHtml({ arrayBuffer });
+      const { value: rawHtml } = await window.mammoth.convertToHtml({ arrayBuffer }, {
+        styleMap: [
+          // Blockquote paragraph styles (LibreOffice + Word)
+          "p[style-name='Quotations'] => blockquote:fresh",
+          "p[style-name='Quote'] => blockquote:fresh",
+          "p[style-name='Intense Quote'] => blockquote:fresh",
+          "p[style-name='Block Text'] => blockquote:fresh",
+          // Character styles not in mammoth defaults
+          "r[style-name='Strong Emphasis'] => strong",    // LibreOffice bold
+          "r[style-name='Emphasis'] => em",               // LibreOffice + Word italic
+          "r[style-name='Intense Emphasis'] => strong > em", // Word bold+italic
+          // Preserve underline (mammoth strips it by default)
+          "u => u",
+          // Alignment helper classes (applied via transformDocument below)
+          "p[style-name='mamm-center'] => p.mamm-center:fresh",
+          "p[style-name='mamm-right'] => p.mamm-right:fresh",
+          "p[style-name='mamm-justify'] => p.mamm-justify:fresh",
+        ],
+        transformDocument: window.mammoth.transforms.paragraph((para) => {
+          if (para.alignment === 'center') return { ...para, styleName: 'mamm-center' };
+          if (para.alignment === 'right' || para.alignment === 'end') return { ...para, styleName: 'mamm-right' };
+          if (para.alignment === 'both') return { ...para, styleName: 'mamm-justify' };
+          return para;
+        }),
+      });
+      // Convert alignment classes → inline style (ProseMirror reads text-align style)
+      const dom = new DOMParser().parseFromString(rawHtml, 'text/html');
+      const alignMap = { 'mamm-center': 'center', 'mamm-right': 'right', 'mamm-justify': 'justify' };
+      for (const [cls, val] of Object.entries(alignMap)) {
+        dom.querySelectorAll(`.${cls}`).forEach((el) => {
+          el.classList.remove(cls);
+          el.style.textAlign = val;
+          if (!el.className) el.removeAttribute('class');
+        });
+      }
+      const html = dom.body.innerHTML;
       bardEditor?.setContent(html);
     } catch (err) {
       uploadBtn.textContent = 'read error';
