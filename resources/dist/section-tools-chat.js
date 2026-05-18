@@ -1833,14 +1833,16 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
   clearBtn.style.color = 'rgba(0,0,0,0.35)';
   clearBtn.style.padding = '0';
 
-  clearBtn.addEventListener('click', () => {
+  function resetChat() {
     messages = [];
     totalInputTokens = 0;
     totalOutputTokens = 0;
     totalCacheReadTokens = 0;
     history.innerHTML = '';
     updateTokenDisplay(tokenInfo);
-  });
+  }
+
+  clearBtn.addEventListener('click', resetChat);
 
   headerButtons.appendChild(techToggle);
   headerButtons.appendChild(clearBtn);
@@ -1986,12 +1988,18 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
     if (!md.trim()) return;
 
     if (mode === 'replace') {
-      commitField(window.Statamic, 'sections', []);
+      resetChat();
+      const values = getPublishStore(window.Statamic)?.values ?? {};
+      for (const [handle, value] of Object.entries(values)) {
+        if (handle === 'slug') continue;
+        const empty = Array.isArray(value) ? [] : typeof value === 'string' ? '' : typeof value === 'boolean' ? false : null;
+        commitField(window.Statamic, handle, empty);
+      }
     }
 
     const preamble = mode === 'replace'
-      ? 'The page sections have been cleared. Build new sections from the document content below.\n'
-      : 'Add new sections from the document content below, appending after all existing sections. Do not modify or remove existing sections.\n';
+      ? 'All page fields have been cleared (except slug). Build the full page from the document content below.\n'
+      : 'Add new content from the document below, appending after existing content. Do not modify or remove anything already on the page.\n';
 
     switchTab('chat');
     handleSend(preamble + BUILD_PROMPT_RULES + md, { maxRounds: MAX_ROUNDS_BUILD, maxTokens: 8192, isBuild: true });
@@ -2000,13 +2008,17 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
   const replaceBtn = document.createElement('button');
   replaceBtn.type = 'button';
   replaceBtn.className = 'btn btn-primary';
-  replaceBtn.textContent = 'clear and build';
+  replaceBtn.textContent = 'Build';
+  replaceBtn.title = 'Clear the entire page and build it from scratch using the document above';
+  replaceBtn.setAttribute('aria-label', 'Clear page and build from document');
   replaceBtn.addEventListener('click', () => doBuild('replace'));
 
   const appendBtn = document.createElement('button');
   appendBtn.type = 'button';
   appendBtn.className = 'btn btn-primary';
-  appendBtn.textContent = 'add to page';
+  appendBtn.textContent = 'Add';
+  appendBtn.title = 'Append new sections to the page based on the document above';
+  appendBtn.setAttribute('aria-label', 'Add document content to page');
   appendBtn.addEventListener('click', () => doBuild('append'));
 
   docHeaderButtons.appendChild(uploadBtn);
