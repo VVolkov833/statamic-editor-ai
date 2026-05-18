@@ -1763,7 +1763,7 @@ function mountBardEditor(container) {
   if (!document.getElementById('st-bard-doc-style')) {
     const s = document.createElement('style');
     s.id = 'st-bard-doc-style';
-    s.textContent = '.st-doc-bard{position:relative;flex:1;min-height:0}.st-doc-bard .bard-fieldtype-wrapper{position:absolute;inset:0;display:flex;flex-direction:column;border:1px solid rgba(0,0,0,0.15);border-radius:4px;overflow:hidden}.st-doc-bard .bard-fixed-toolbar{flex-shrink:0}.st-doc-bard .bard-editor{display:flex;flex-direction:column;flex:1;min-height:0}.st-doc-bard .bard-editor>div{display:flex;flex-direction:column;flex:1;min-height:0}.st-doc-bard .bard-editor .ProseMirror{flex:1;min-height:80px;overflow-y:auto;padding:6px 8px;outline:none}.st-doc-bard .bard-content{overflow-y:auto}.st-doc-bard .bard-content ul{list-style-type:disc;padding-left:1.5em;margin:.3em 0}.st-doc-bard .bard-content ol{list-style-type:decimal;padding-left:1.5em;margin:.3em 0}.st-doc-bard .bard-content li{margin:.1em 0}.st-doc-bard .bard-content blockquote{border-left:3px solid rgba(0,0,0,0.25);padding-left:.75em;margin:.3em 0;color:rgba(0,0,0,0.6);font-style:italic}.st-doc-bard .bard-content table{border-collapse:collapse;width:100%;margin:.5em 0}.st-doc-bard .bard-content td,.st-doc-bard .bard-content th{border:1px solid rgba(0,0,0,0.2);padding:4px 8px;min-width:2em}.st-doc-bard .bard-content th{background:rgba(0,0,0,0.04);font-weight:600}.st-doc-portals .popover{z-index:100}.st-doc-portals .stack{z-index:100}.st-doc-bard .bard-content a{color:#43a9ff;text-decoration:underline}';
+    s.textContent = '.st-doc-bard{position:relative;flex:1;min-height:0}.st-doc-bard .bard-fieldtype-wrapper{position:absolute;inset:0;display:flex;flex-direction:column;border:1px solid rgba(0,0,0,0.15);border-radius:4px;overflow:hidden}.st-doc-bard .bard-fixed-toolbar{flex-shrink:0}.st-doc-bard .bard-editor{display:flex;flex-direction:column;flex:1;min-height:0}.st-doc-bard .bard-editor>div{display:flex;flex-direction:column;flex:1;min-height:0}.st-doc-bard .bard-editor .ProseMirror{flex:1;min-height:80px;overflow-y:auto;padding:6px 8px;outline:none}.st-doc-bard .bard-content{overflow-y:auto}.st-doc-bard .bard-content ul{list-style-type:disc;padding-left:1.5em;margin:.3em 0}.st-doc-bard .bard-content ol{list-style-type:decimal;padding-left:1.5em;margin:.3em 0}.st-doc-bard .bard-content li{margin:.1em 0}.st-doc-bard .ProseMirror blockquote,.st-doc-bard .bard-content blockquote{background:#fffbeb;border-left:3px solid #f5c518;padding:.3em .5em .3em .75em;margin:.3em 0;color:#78350f;font-style:italic;border-radius:0 3px 3px 0}.st-doc-bard .bard-content table{border-collapse:collapse;width:100%;margin:.5em 0}.st-doc-bard .bard-content td,.st-doc-bard .bard-content th{border:1px solid rgba(0,0,0,0.2);padding:4px 8px;min-width:2em}.st-doc-bard .bard-content th{background:rgba(0,0,0,0.04);font-weight:600}.st-doc-portals .popover{z-index:100}.st-doc-portals .stack{z-index:100}.st-doc-bard .bard-content a{color:#43a9ff;text-decoration:underline}.st-doc-bard .bard-fixed-toolbar button[aria-label="Blockquote"]{background:#fffbeb;color:#92610a;border-radius:3px;border-left:2px solid #f5c518;margin-right:5px}';
     document.head.appendChild(s);
   }
   container.classList.add('st-doc-bard');
@@ -1795,7 +1795,7 @@ function mountBardEditor(container) {
           bardValue: [],
           bardConfig: {
             sets: null,
-            buttons: ['h1', 'h2', 'h3', 'h4', 'bold', 'italic', 'underline', 'alignleft', 'aligncenter', 'alignright', 'unorderedlist', 'orderedlist', 'quote', 'anchor', 'table', 'removeformat'],
+            buttons: ['quote', 'h1', 'h2', 'h3', 'h4', 'bold', 'italic', 'underline', 'alignleft', 'aligncenter', 'alignright', 'unorderedlist', 'orderedlist', 'anchor', 'table', 'removeformat'],
             toolbar_mode: 'fixed',
             allow_source: false,
             fullscreen: false,
@@ -2145,7 +2145,7 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
   uploadBtn.addEventListener('click', () => { if (!uploadBtn.disabled) docxInput.click(); });
 
   const BUILD_PROMPT_RULES =
-    'Blockquotes are editor instructions — they describe what to create and how. The content directly below a blockquote is the actual content for that section. Blockquotes may use formal directives ("> [[ SECTION: type ]]") or plain natural language ("Quote section, text below") — treat both as instructions.\n' +
+    'Lines starting with "> " (blockquotes in markdown) are editor instructions — they tell you what section/field to create or update. Everything else is the actual page content to fill in.\n' +
     'GRID FIELDS: some fields (e.g. "rows" in table sections) are grid fields, NOT replicators. ' +
     'Grid fields have no _id per row and cannot use add_item. ' +
     'Populate a grid field by calling update_item on the parent with the full array value.\n' +
@@ -2155,8 +2155,20 @@ export function createChatSection(getBrief, getBlueprintData, panelStorageKey) {
     '  3. update_item(GROUP_ID, {rows:[{label:"Label",text:[{type:"paragraph",content:[{type:"text",text:"Value"}]}]}, ...]}) — do this immediately in the same tool batch as step 2 if possible, or in the very next tool call. Do NOT skip this step or say you will do it later.\n\n' +
     '---\n\n';
 
+  function preprocessBardHtml(html) {
+    const dom = new DOMParser().parseFromString(html, 'text/html');
+    dom.querySelectorAll('p').forEach((p) => {
+      if (p.textContent.startsWith('# ')) {
+        const bq = dom.createElement('blockquote');
+        bq.innerHTML = p.innerHTML.replace(/^#\s+/, '');
+        p.replaceWith(bq);
+      }
+    });
+    return dom.body.innerHTML;
+  }
+
   function doBuild(mode) {
-    const html = bardEditor?.getHTML() ?? '';
+    const html = preprocessBardHtml(bardEditor?.getHTML() ?? '');
     const md = htmlToMarkdown(html);
     if (!md.trim()) return;
 
