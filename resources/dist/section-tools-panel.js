@@ -21,14 +21,8 @@ function createButton(label, onClick) {
 }
 
 function appendDefaultActionButtons(container, actions) {
-  container.appendChild(createButton('Quote +', actions.onQuote));
-  container.appendChild(createButton('Swap 2<->3', actions.onSwap));
-  container.appendChild(createButton('Clone 3 +1', actions.onClone));
-  container.appendChild(createButton('unde', actions.onUndo));
-  container.appendChild(createButton('Log §2', actions.onLogSection2));
-  container.appendChild(createButton('Log §2 Blueprint', actions.onLogSection2Blueprint));
+  container.appendChild(createButton('undo', actions.onUndo));
   container.appendChild(createButton('Log Page Brief', actions.onLogPageBrief));
-  container.appendChild(createButton('Search Assets', actions.onSearchAssets));
   container.appendChild(createButton('Log AI Blueprint', actions.onLogAiBlueprint));
 }
 

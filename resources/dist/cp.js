@@ -1,17 +1,8 @@
 import {
-  insertQuoteAsSecondSection,
-  swapSections2And3,
-  cloneThirdSectionAfterwards,
   undoLastMutation,
 } from './section-tools-mutations';
 import {
   logSectionById,
-  logSectionBlueprintById,
-  logSection2,
-  logSection2Blueprint,
-  logPageBrief,
-  searchAssets,
-  logAssetSearch,
 } from './section-tools-queries';
 import { syncSectionToolsUi, persistPanelPositionOnResize, togglePanelVisibility } from './section-tools-panel';
 import { getPublishStore as libGetPublishStore, buildPageBrief as libBuildPageBrief } from './section-tools-lib';
@@ -129,9 +120,7 @@ import { getAiBlueprintSets } from './section-tools-chat';
 
   window.SectionTools = window.SectionTools ?? {};
   window.SectionTools.logSectionById = logSectionById;
-  window.SectionTools.logBlueprintById = logSectionBlueprintById;
-  window.SectionTools.logPageBrief = logPageBrief;
-  window.SectionTools.searchAssets = searchAssets;
+  window.SectionTools.logPageBrief = () => console.log('[SectionTools] Page brief (as sent to AI):', JSON.stringify(buildBrief(), null, 2));
   window.SectionTools.togglePanel = () => togglePanelVisibility(panelStorageKey);
 
   const TOPBAR_BTN_ID = 'section-tools-topbar-btn';
@@ -198,14 +187,8 @@ import { getAiBlueprintSets } from './section-tools-chat';
       getBrief: buildBrief,
       getBlueprintData,
       actions: {
-        onQuote: insertQuoteAsSecondSection,
-        onSwap: swapSections2And3,
-        onClone: cloneThirdSectionAfterwards,
         onUndo: undoLastMutation,
-        onLogSection2: logSection2,
-        onLogSection2Blueprint: logSection2Blueprint,
-        onLogPageBrief: logPageBrief,
-        onSearchAssets: logAssetSearch,
+        onLogPageBrief: () => console.log('[SectionTools] Page brief (as sent to AI):', JSON.stringify(buildBrief(), null, 2)),
         onLogAiBlueprint: () => console.log('[SectionTools] AI Blueprint (sent to cache):', getAiBlueprintSets()),
       },
     });
